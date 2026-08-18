@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from .microphone import resolve_input_sample_rate
 from .phrases import normalize_phrase, phrase_matches
 
 LOG = logging.getLogger(__name__)
@@ -86,8 +87,6 @@ class HotwordListener:
                 values.append(float(item["conf"]))
             except (KeyError, TypeError, ValueError):
                 continue
-        # Minimum word confidence is deliberately harsher than an average: one
-        # uncertain word is enough to reject a wake phrase.
         return min(values) if values else None
 
     def _emit_debug(
@@ -145,13 +144,8 @@ class HotwordListener:
         normalized = normalize_phrase(text)
         active = self._active.is_set()
 
-        # Wake is EXACT, not suffix/fuzzy matching. 0.5.2 deliberately removes
-        # the previous phonetic aliases and partial-result wake path.
         canonical_wake = normalize_phrase(self.wake_aliases[0]) if self.wake_aliases else ""
         wake_match = bool(canonical_wake and normalized == canonical_wake)
-
-        # Stop is allowed to be a suffix so a partial decoder that carries a
-        # tiny amount of preceding speech can still terminate Voice instantly.
         stop_match = phrase_matches(normalized, self.stop_aliases)
 
         accepted: str | None = None
@@ -164,8 +158,6 @@ class HotwordListener:
                 self._stop_fired_for_session = True
                 accepted = "stop"
                 reason = "partial_fast_stop" if not final else "final_stop"
-                # Queue STOP before doing anything expensive. This is the
-                # lowest-latency path in the entire listener.
                 self.on_stop()
             elif stop_match and self._stop_fired_for_session:
                 reason = "stop_already_fired"
@@ -212,9 +204,18 @@ class HotwordListener:
         retry_delay = 2.0
         while not self._stop.is_set():
             try:
-                recognizer = KaldiRecognizer(model, 16000, json.dumps(grammar, ensure_ascii=False))
-                # Vosk exposes per-word confidences in both final and partial
-                # results when these flags are enabled.
+                # Do not force USB/pro-audio devices to 16 kHz. PortAudio may
+                # expose only 44.1/48 kHz for devices such as Audient iD4.
+                # KaldiRecognizer receives the actual input rate and handles it
+                # as the source sampling frequency.
+                sample_rate = resolve_input_sample_rate(sd, self.microphone_device)
+                blocksize = max(320, int(round(sample_rate * 0.10)))
+
+                recognizer = KaldiRecognizer(
+                    model,
+                    sample_rate,
+                    json.dumps(grammar, ensure_ascii=False),
+                )
                 recognizer.SetWords(True)
                 try:
                     recognizer.SetPartialWords(True)
@@ -232,18 +233,17 @@ class HotwordListener:
                         pass
 
                 with sd.RawInputStream(
-                    samplerate=16000,
-                    # 100 ms blocks make STOP noticeably more immediate than
-                    # the previous 250 ms blocks while remaining lightweight.
-                    blocksize=1600,
+                    samplerate=sample_rate,
+                    blocksize=blocksize,
                     dtype="int16",
                     channels=1,
                     device=self.microphone_device,
                     callback=callback,
                 ):
                     LOG.info(
-                        "Hotword listener ready (device=%s, wake>=%.2f final-only, stop>=%.2f partial-ok)",
+                        "Hotword listener ready (device=%s, sample_rate=%d Hz, wake>=%.2f final-only, stop>=%.2f partial-ok)",
                         self.microphone_device,
+                        sample_rate,
                         self.wake_confidence_threshold,
                         self.stop_confidence_threshold,
                     )
@@ -267,8 +267,6 @@ class HotwordListener:
                             payload = json.loads(recognizer.PartialResult())
                             partial = str(payload.get("partial", ""))
                             if partial:
-                                # Partial results are diagnostic-only for wake,
-                                # but are the primary fast path for STOP.
                                 self._dispatch(
                                     partial,
                                     final=False,
