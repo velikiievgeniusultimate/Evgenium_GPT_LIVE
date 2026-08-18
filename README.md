@@ -13,6 +13,68 @@ The intended interaction is simple:
 
 > Status: early Linux MVP. Web UI automation is inherently sensitive to ChatGPT DOM changes; selectors are isolated in `src/egl/browser.py` so fixes stay small.
 
+## One-line install
+
+For the current MVP branch:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/agent/egl-linux-mvp/bootstrap.sh | bash
+```
+
+The bootstrapper is intentionally interactive only where interaction is actually required. It will:
+
+1. install/check Linux prerequisites (Arch/pacman, Debian/apt and Fedora/dnf are recognized; `sudo` may ask for your password);
+2. clone/update the project into **`~/Evgenium_GPT`**;
+3. create `~/Evgenium_GPT/.venv`;
+4. install EGL and Playwright Chromium;
+5. download/configure the local Russian Vosk model during setup;
+6. open a visible dedicated Chromium profile once so you can sign in to ChatGPT;
+7. ask you to open the exact chat EGL should remember;
+8. save the selected chat and persistent browser profile;
+9. install and start the `systemd --user` service.
+
+No ChatGPT password is stored by EGL. The login remains inside EGL's dedicated Chromium profile.
+
+### Main EGL directory
+
+Almost everything belongs to one predictable place:
+
+```text
+~/Evgenium_GPT/
+├── .git/                       project checkout
+├── .venv/                      private Python environment
+├── config/
+│   └── config.json             EGL settings (0600)
+├── data/
+│   ├── browser-profile/        persistent ChatGPT login/session
+│   └── models/                 local Vosk speech model
+├── state/                      daemon state/fallback runtime data
+├── src/                        EGL source code
+├── bootstrap.sh
+└── install.sh
+```
+
+Only two small integration files intentionally live outside that directory:
+
+```text
+~/.config/systemd/user/egl.service    autostart service
+~/.local/bin/egl                      symlink to EGL CLI
+```
+
+Temporary IPC may use `$XDG_RUNTIME_DIR/egl`, which disappears with the user session.
+
+You can override the installation directory if needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/agent/egl-linux-mvp/bootstrap.sh | EGL_HOME="$HOME/My_EGL" bash
+```
+
+To skip automatic OS package installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/agent/egl-linux-mvp/bootstrap.sh | EGL_SKIP_SYSTEM_DEPS=1 bash
+```
+
 ## Architecture
 
 ```text
@@ -49,37 +111,19 @@ The first MVP targets a normal Linux desktop (Arch/KDE is the primary target).
 - `systemd --user`
 - graphical session for the orb
 
-Recommended on Arch:
-
-```bash
-sudo pacman -S --needed python pipewire pipewire-pulse pulseaudio-utils
-```
+The one-line bootstrapper attempts to install the basic system dependencies automatically. On Arch it uses packages such as `python`, `portaudio` and `pulseaudio-utils`.
 
 `pulseaudio-utils` provides `pactl`/`parec`; EGL uses them only to make the orb react to output audio. Voice itself can still work without the meter.
 
-## Install
+## First setup
 
-```bash
-git clone https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git
-cd Evgenium_GPT_LIVE
-./install.sh
-```
+EGL will show available microphone devices and then open a **visible** dedicated Chromium profile.
 
-`install.sh` creates an isolated venv in `~/.local/share/egl/venv`, installs EGL and Playwright Chromium, then starts the setup wizard.
-
-### First setup
-
-EGL will:
-
-1. download the small Russian Vosk model (~45 MB);
-2. show available microphone devices;
-3. open a **visible** dedicated Chromium profile;
-4. ask you to sign in to ChatGPT once;
-5. ask you to open the exact chat you want EGL to reuse;
-6. remember that chat URL and browser profile;
-7. install and start `egl.service` as a user service.
-
-No ChatGPT password is stored by EGL. Browser cookies/local storage live in the dedicated Chromium profile at `~/.local/share/egl/browser-profile`.
+1. Sign in to ChatGPT.
+2. Open the chat you want EGL to reuse for voice sessions.
+3. Return to the terminal and press ENTER.
+4. EGL remembers the exact chat URL and browser profile.
+5. The user service starts automatically.
 
 After setup the runtime browser is headless by default.
 
@@ -111,7 +155,7 @@ egl service restart
 egl service logs
 ```
 
-These are useful while tuning the hotword detector or after a ChatGPT UI change.
+If `~/.local/bin` is not currently in your shell PATH, the service still works; add that directory to PATH only for convenient manual `egl` commands.
 
 ## Live orb
 
@@ -138,16 +182,9 @@ The first implementation uses Vosk with a tiny restricted Russian grammar. Becau
 
 If this is not reliable enough, the hotword module is deliberately isolated so it can later be replaced with a custom wake-word model without touching browser control or the UI orb.
 
-## Files
+## Updating
 
-```text
-~/.config/egl/config.json                 EGL settings (0600)
-~/.local/share/egl/browser-profile/       dedicated ChatGPT Chromium profile
-~/.local/share/egl/models/                offline Vosk model
-~/.local/share/egl/venv/                  install.sh virtual environment
-~/.local/state/egl/state.json             current daemon state
-~/.config/systemd/user/egl.service        autostart service
-```
+Running the same one-line installer again updates an existing clean `~/Evgenium_GPT` checkout and reinstalls the Python package. It refuses to overwrite local uncommitted Git changes.
 
 ## Known limitations
 
