@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="0.4.0"
+BOOTSTRAP_VERSION="0.5.0"
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
 EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
@@ -45,7 +45,9 @@ install_system_deps() {
   say "Checking/installing required Linux dependencies (sudo may ask for your password)..."
 
   if command -v pacman >/dev/null 2>&1; then
-    run_root pacman -S --needed --noconfirm git python python-pip portaudio
+    # Xvfb is required by EGL 0.5+: the permanent runtime Chromium lives on a
+    # private virtual X display and therefore has no visible Plasma window.
+    run_root pacman -S --needed --noconfirm git python python-pip portaudio xorg-server-xvfb
 
     if ! has_system_browser; then
       say "No normal Chromium-family browser found; installing Arch Chromium."
@@ -58,7 +60,7 @@ install_system_deps() {
 
   elif command -v apt-get >/dev/null 2>&1; then
     run_root apt-get update
-    run_root apt-get install -y git python3 python3-venv python3-pip libportaudio2
+    run_root apt-get install -y git python3 python3-venv python3-pip libportaudio2 xvfb
     if ! has_system_browser; then
       warn "No supported Chromium-family browser detected. Install Chromium/Chrome before EGL setup or set EGL_BROWSER=/path/to/browser."
     fi
@@ -67,7 +69,7 @@ install_system_deps() {
     fi
 
   elif command -v dnf >/dev/null 2>&1; then
-    run_root dnf install -y git python3 python3-pip portaudio
+    run_root dnf install -y git python3 python3-pip portaudio xorg-x11-server-Xvfb
     if ! has_system_browser; then
       warn "No supported Chromium-family browser detected. Install Chromium/Chrome before EGL setup or set EGL_BROWSER=/path/to/browser."
     fi
@@ -76,7 +78,7 @@ install_system_deps() {
     fi
 
   else
-    warn "Unknown package manager. Continuing if git, Python, PortAudio and a Chromium-family browser are already available."
+    warn "Unknown package manager. Continuing if git, Python, PortAudio, Xvfb and a Chromium-family browser are already available."
   fi
 }
 
@@ -87,6 +89,7 @@ say "Install directory: $EGL_HOME"
 install_system_deps
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
+command -v Xvfb >/dev/null 2>&1 || die "Xvfb is required for EGL's invisible runtime browser."
 has_system_browser || die "A normal Chromium-family browser is required. Install Chromium/Chrome or set EGL_BROWSER=/path/to/browser."
 
 if [[ -d "$EGL_HOME/.git" ]]; then
