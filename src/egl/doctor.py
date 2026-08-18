@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .browser import find_system_browser
+from .browser import find_system_browser, find_xvfb
 from .config import app_home, config_path, load_config
 from .integration import integration_summary
 
@@ -40,6 +40,16 @@ def run_doctor() -> int:
             "FAIL",
             "No system Chromium-family browser found. On Arch install chromium, "
             "or set EGL_BROWSER=/path/to/browser",
+        )
+
+    xvfb = find_xvfb()
+    if xvfb:
+        _line("OK", f"Invisible runtime display: {xvfb}")
+    else:
+        failures += 1
+        _line(
+            "FAIL",
+            "Xvfb is missing. EGL 0.5 keeps Chromium permanently running on a private virtual display.",
         )
 
     try:
@@ -90,11 +100,6 @@ def run_doctor() -> int:
         _line("OK", "EGL settings application entry installed")
     else:
         _line("WARN", "EGL settings application entry is not installed")
-    if integration["plasma"]:
-        if integration["kwin_script"]:
-            _line("OK", "KWin EGL Window Guard installed")
-        else:
-            _line("WARN", "Plasma detected but EGL Window Guard is not installed")
 
     if config_path().exists():
         try:
@@ -109,8 +114,7 @@ def run_doctor() -> int:
                 _line("OK", f"Vosk model: {model}")
             else:
                 _line("WARN", "Vosk model is not downloaded yet; setup will download it")
-            _line("INFO", f"Background browser: {cfg.browser_headless}")
-            _line("INFO", f"Keep browser alive after Voice: {cfg.browser_keep_alive}")
+            _line("INFO", "Runtime browser policy: permanent + private Xvfb display")
         except Exception as exc:
             failures += 1
             _line("FAIL", f"Config could not be read: {exc}")
