@@ -37,6 +37,22 @@ class HotwordDebugTests(unittest.TestCase):
         self.assertEqual(debug[-1], ("евгениум слушай", False, True, False))
         self.assertEqual(woke, [True])
 
+    def test_stop_is_not_suppressed_by_recent_wake(self):
+        woke = []
+        stopped = []
+        listener = HotwordListener(
+            model_path=Path(tempfile.gettempdir()),
+            wake_aliases=["евгениум слушай"],
+            stop_aliases=["евгениум стоп"],
+            on_wake=lambda: woke.append(True),
+            on_stop=lambda: stopped.append(True),
+        )
+        listener._dispatch("евгениум слушай")
+        listener.set_voice_active(True)
+        listener._dispatch("евгениум стоп")
+        self.assertEqual(woke, [True])
+        self.assertEqual(stopped, [True])
+
 
 if __name__ == "__main__":
     unittest.main()
