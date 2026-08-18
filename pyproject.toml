@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evgenium-gpt-live"
+version = "0.1.0"
+description = "Linux voice launcher for ChatGPT Web: wake phrase, stop phrase, persistent chat, and live audio indicator."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Evgenium GPT LIVE contributors"}]
+dependencies = [
+  "playwright>=1.50,<2",
+  "vosk>=0.3.45,<1",
+  "sounddevice>=0.5.1,<1",
+  "PySide6>=6.8,<7",
+]
+
+[project.scripts]
+egl = "egl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
