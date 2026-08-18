@@ -9,6 +9,7 @@ from typing import Any
 APP_NAME = "egl"
 DEFAULT_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
 DEFAULT_MODEL_DIRNAME = "vosk-model-small-ru-0.22"
+DEFAULT_BROWSER_PROFILE_DIRNAME = "browser-profile-system"
 
 
 def app_home() -> Path:
@@ -66,7 +67,7 @@ class EGLConfig:
     def default(cls) -> "EGLConfig":
         cfg = cls()
         cfg.vosk_model_path = str(data_dir() / "models" / DEFAULT_MODEL_DIRNAME)
-        cfg.browser_profile_path = str(data_dir() / "browser-profile")
+        cfg.browser_profile_path = str(data_dir() / DEFAULT_BROWSER_PROFILE_DIRNAME)
         return cfg
 
     @classmethod
