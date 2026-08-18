@@ -15,10 +15,8 @@ The intended interaction is simple:
 
 ## One-line install
 
-For the current MVP branch:
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/agent/egl-linux-mvp/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/main/bootstrap.sh | bash
 ```
 
 The bootstrapper is intentionally interactive only where interaction is actually required. It will:
@@ -66,13 +64,13 @@ Temporary IPC may use `$XDG_RUNTIME_DIR/egl`, which disappears with the user ses
 You can override the installation directory if needed:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/agent/egl-linux-mvp/bootstrap.sh | EGL_HOME="$HOME/My_EGL" bash
+curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/main/bootstrap.sh | EGL_HOME="$HOME/My_EGL" bash
 ```
 
 To skip automatic OS package installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/agent/egl-linux-mvp/bootstrap.sh | EGL_SKIP_SYSTEM_DEPS=1 bash
+curl -fsSL https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_GPT_LIVE/refs/heads/main/bootstrap.sh | EGL_SKIP_SYSTEM_DEPS=1 bash
 ```
 
 ## Architecture
@@ -184,7 +182,7 @@ If this is not reliable enough, the hotword module is deliberately isolated so i
 
 ## Updating
 
-Running the same one-line installer again updates an existing clean `~/Evgenium_GPT` checkout and reinstalls the Python package. It refuses to overwrite local uncommitted Git changes.
+Running the same one-line installer again updates an existing clean `~/Evgenium_GPT` checkout from `main` and reinstalls the Python package. It refuses to overwrite local uncommitted Git changes.
 
 ## Known limitations
 
