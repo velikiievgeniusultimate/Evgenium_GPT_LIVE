@@ -9,15 +9,12 @@ say() { printf '\033[1;36m[EGL]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[EGL]\033[0m %s\n' "$*" >&2; exit 1; }
 
 install_system_deps() {
-  local need=0
-  command -v git >/dev/null 2>&1 || need=1
-  command -v python3 >/dev/null 2>&1 || need=1
-
-  if (( need == 0 )); then
+  if [[ "${EGL_SKIP_SYSTEM_DEPS:-0}" == "1" ]]; then
+    say "Skipping system dependency installation (EGL_SKIP_SYSTEM_DEPS=1)."
     return
   fi
 
-  say "Installing required system packages..."
+  say "Checking/installing Linux dependencies (sudo may ask for your password)..."
   if command -v pacman >/dev/null 2>&1; then
     sudo pacman -S --needed --noconfirm git python python-pip portaudio pulseaudio-utils
   elif command -v apt-get >/dev/null 2>&1; then
@@ -26,7 +23,7 @@ install_system_deps() {
   elif command -v dnf >/dev/null 2>&1; then
     sudo dnf install -y git python3 python3-pip portaudio pulseaudio-utils
   else
-    die "git/python3 are missing and your package manager is not supported automatically."
+    say "Unknown package manager; continuing if git/python3 are already installed."
   fi
 }
 
@@ -57,4 +54,4 @@ else
 fi
 
 export EGL_HOME
-exec "$EGL_HOME/install.sh"
+exec bash "$EGL_HOME/install.sh"
