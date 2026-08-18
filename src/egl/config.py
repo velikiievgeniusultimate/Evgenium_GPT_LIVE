@@ -40,15 +40,15 @@ class EGLConfig:
     chat_url: str = ""
     wake_phrase: str = "евгениум слушай"
     stop_phrase: str = "евгениум стоп"
-    wake_aliases: list[str] = field(default_factory=lambda: [
-        "евгениум слушай",
-        "евгений слушай",
-        "евгениум слушает",
-    ])
-    stop_aliases: list[str] = field(default_factory=lambda: [
-        "евгениум стоп",
-        "евгений стоп",
-    ])
+    # 0.5.2 deliberately removed the old soft aliases ("евгений слушай",
+    # "евгениум слушает", ...). Wake must be the exact canonical phrase.
+    wake_aliases: list[str] = field(default_factory=lambda: ["евгениум слушай"])
+    stop_aliases: list[str] = field(default_factory=lambda: ["евгениум стоп"])
+    # Wake is conservative: only a FINAL Vosk result with every decoded word
+    # above this confidence may trigger it. Stop is intentionally much more
+    # permissive and is allowed on partial recognition while Voice is active.
+    wake_confidence_threshold: float = 0.86
+    stop_confidence_threshold: float = 0.35
     vosk_model_url: str = DEFAULT_MODEL_URL
     vosk_model_path: str = ""
     browser_profile_path: str = ""
@@ -72,9 +72,27 @@ class EGLConfig:
     def from_dict(cls, raw: dict[str, Any]) -> "EGLConfig":
         defaults = asdict(cls.default())
         defaults.update(raw)
-        # Migrate old 0.4 user choices to the fixed 0.5 runtime invariant.
+        # Migrate old 0.4/0.5 user choices to the fixed runtime invariants.
         defaults["browser_headless"] = True
         defaults["browser_keep_alive"] = True
+        # Security/reliability migration: old soft aliases were a major source
+        # of accidental wake-ups. The configured phrases are now canonical.
+        wake_phrase = str(defaults.get("wake_phrase") or "евгениум слушай")
+        stop_phrase = str(defaults.get("stop_phrase") or "евгениум стоп")
+        defaults["wake_aliases"] = [wake_phrase]
+        defaults["stop_aliases"] = [stop_phrase]
+        try:
+            defaults["wake_confidence_threshold"] = min(
+                0.99, max(0.0, float(defaults.get("wake_confidence_threshold", 0.86)))
+            )
+        except (TypeError, ValueError):
+            defaults["wake_confidence_threshold"] = 0.86
+        try:
+            defaults["stop_confidence_threshold"] = min(
+                0.99, max(0.0, float(defaults.get("stop_confidence_threshold", 0.35)))
+            )
+        except (TypeError, ValueError):
+            defaults["stop_confidence_threshold"] = 0.35
         return cls(**defaults)
 
 
@@ -97,10 +115,12 @@ def load_config() -> EGLConfig:
 
 def save_config(cfg: EGLConfig) -> Path:
     ensure_dirs()
-    # Do not let old callers persist a configuration that violates 0.5's
-    # permanent-hidden-browser contract.
     cfg.browser_headless = True
     cfg.browser_keep_alive = True
+    # Persist only the canonical phrases. Aliases are deliberately not a user
+    # escape hatch anymore because they make wake detection much softer.
+    cfg.wake_aliases = [cfg.wake_phrase]
+    cfg.stop_aliases = [cfg.stop_phrase]
     path = config_path()
     tmp = path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
