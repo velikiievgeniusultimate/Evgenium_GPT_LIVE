@@ -29,16 +29,20 @@ def install_service(enable: bool = True) -> Path:
     executable_text = _systemd_quote(str(executable))
     home_text = _systemd_quote(str(egl_home))
 
+    # Network is intentionally NOT an ordering dependency. The daemon is fully
+    # local until the wake phrase is heard, so boot/login works with VPN down.
+    # Start limiting prevents a genuine code/config crash from spinning forever.
     unit = f"""[Unit]
 Description=Evgenium GPT LIVE (EGL)
-After=network-online.target pipewire.service pipewire-pulse.service
-Wants=network-online.target
+After=pipewire.service pipewire-pulse.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=\"{executable_text}\" daemon
 Restart=on-failure
-RestartSec=3
+RestartSec=10
 Environment=PYTHONUNBUFFERED=1
 Environment=\"EGL_HOME={home_text}\"
 
