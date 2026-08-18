@@ -9,6 +9,7 @@ from pathlib import Path
 from .browser import find_system_browser, find_xvfb
 from .config import app_home, config_path, load_config
 from .integration import integration_summary
+from .microphone import resolve_input_sample_rate
 
 
 def _line(kind: str, text: str) -> None:
@@ -49,7 +50,7 @@ def run_doctor() -> int:
         failures += 1
         _line(
             "FAIL",
-            "Xvfb is missing. EGL 0.5 keeps Chromium permanently running on a private virtual display.",
+            "Xvfb is missing. EGL keeps Chromium permanently running on a private virtual display.",
         )
 
     try:
@@ -60,9 +61,21 @@ def run_doctor() -> int:
         if inputs:
             _line("OK", f"Microphone-capable audio devices: {len(inputs)}")
         else:
-            _line("WARN", "No microphone-capable PortAudio devices reported")
+            failures += 1
+            _line("FAIL", "No microphone-capable PortAudio devices reported")
+
+        cfg_for_mic = load_config()
+        selected = cfg_for_mic.microphone_device
+        rate = resolve_input_sample_rate(sd, selected)
+        info = sd.query_devices(selected, "input")
+        label = str(info.get("name", "default input"))
+        _line(
+            "OK",
+            f"Selected microphone: {label} (device={selected if selected is not None else 'default'}, {rate} Hz mono/int16)",
+        )
     except Exception as exc:
-        _line("WARN", f"Could not query microphone devices: {exc}")
+        failures += 1
+        _line("FAIL", f"Selected microphone cannot be opened: {exc}")
 
     if shutil.which("pactl") and shutil.which("parec"):
         _line("OK", "pactl/parec available for the audio-reactive orb")
