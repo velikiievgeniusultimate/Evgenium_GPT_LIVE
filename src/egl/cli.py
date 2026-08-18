@@ -24,9 +24,16 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--no-service", action="store_true", help="do not install/start systemd user service")
     sub.add_parser("doctor", help="check EGL dependencies, browser, audio and configuration")
     sub.add_parser("daemon", help="run EGL in foreground")
+    sub.add_parser("gui", help="open EGL settings GUI")
     sub.add_parser("wake", help="manually start ChatGPT Voice")
     sub.add_parser("stop", help="manually stop ChatGPT Voice")
     sub.add_parser("status", help="show current EGL state")
+
+    browser = sub.add_parser("browser", help="show/hide the dedicated service Chromium")
+    browser.add_argument("action", choices=["show", "hide"])
+
+    integration = sub.add_parser("integration", help="install desktop/KDE integration")
+    integration.add_argument("action", choices=["install", "status"])
 
     service = sub.add_parser("service", help="manage systemd user service")
     service.add_argument("action", choices=["install", "uninstall", "start", "stop", "restart", "status", "logs"])
@@ -49,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "daemon":
         from .daemon import run_daemon
         return run_daemon()
+    if args.command == "gui":
+        from .gui import run_gui
+        return run_gui()
     if args.command == "wake":
         try:
             send_command("wake")
@@ -63,9 +73,25 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             print(f"EGL daemon is not running: {exc}", file=sys.stderr)
             return 1
+    if args.command == "browser":
+        try:
+            send_command(f"browser_{args.action}")
+            return 0
+        except OSError as exc:
+            print(f"EGL daemon is not running: {exc}", file=sys.stderr)
+            return 1
     if args.command == "status":
         state = read_state()
         print(f"{state.mode}: {state.detail}".rstrip(": "))
+        return 0
+    if args.command == "integration":
+        from .integration import install_integrations, integration_summary
+        if args.action == "install":
+            for path in install_integrations():
+                print(path)
+            return 0
+        for key, value in integration_summary().items():
+            print(f"{key}: {value}")
         return 0
     if args.command == "service":
         if args.action == "install":
