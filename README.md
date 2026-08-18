@@ -1,17 +1,17 @@
 # Evgenium GPT LIVE — EGL
 
-**EGL** turns the regular ChatGPT **Web Voice** session into a Linux-native voice assistant with local wake/stop phrases, a persistent authenticated browser profile, Plasma integration, autostart and a live desktop orb.
+**EGL** turns the regular ChatGPT **Web Voice** session into a Linux-native voice assistant with local wake/stop phrases, a persistent authenticated browser profile, autostart, GUI settings and a live desktop orb.
 
-Current version: **0.4.0**. Arch Linux + KDE Plasma is the primary target.
+Current version: **0.5.0**. Arch Linux + KDE Plasma is the primary target.
 
 ## What it should feel like
 
-- say **«Евгениум слушай»** → EGL starts Voice in one remembered ChatGPT chat;
-- talk normally to ChatGPT;
-- while Voice is active, the live orb appears in the bottom-left corner;
-- say **«Евгениум стоп»** → EGL locally terminates Voice;
-- the service Chromium normally stays out of the taskbar, pager and Alt+Tab;
-- open **Evgenium GPT LIVE** from the application launcher when you actually want settings or the service browser.
+- EGL starts with the desktop and immediately keeps one authenticated ChatGPT tab alive in the background;
+- that Chromium window lives on a **private Xvfb virtual display**, so Plasma never sees it;
+- say **«Евгениум слушай»** → EGL clicks Voice in the already-loaded tab;
+- say **«Евгениум стоп»** → EGL exits Voice but keeps the same Chromium process and chat tab alive;
+- the next wake therefore does not race page startup/loading;
+- open **Evgenium GPT LIVE** from the application launcher when you want settings.
 
 ## One-line install / update
 
@@ -22,70 +22,61 @@ curl -fsSL "https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_G
 You should see:
 
 ```text
-[EGL] Evgenium GPT LIVE bootstrap v0.4.0
+[EGL] Evgenium GPT LIVE bootstrap v0.5.0
 [EGL] Target ref: main
 [EGL] Install directory: /home/.../Evgenium_GPT
 ```
 
 Almost everything remains under `~/Evgenium_GPT`.
 
-## EGL 0.4 boot/network behavior
+## Permanent hidden browser
 
-The daemon is now deliberately **network-independent at startup**.
-
-At Plasma login only these local pieces start:
+EGL 0.5 deliberately separates **browser lifetime** from **Voice lifetime**:
 
 ```text
+Plasma login
+    ↓
 systemd --user
-      ↓
+    ↓
 EGL daemon
-      ├── Vosk wake/stop listener
-      ├── local control socket
-      └── live-orb service
+    ├── Vosk wake/stop listener
+    ├── permanent Xvfb server (private display, e.g. :90)
+    └── permanent system Chromium
+            └── remembered chatgpt.com chat
+                    └── Voice button already waiting
 ```
 
-**Chromium is not launched at login.** Internet/VPN is not a systemd dependency.
+The runtime Chromium is a normal headed browser because WebRTC/audio reliability matters, but it renders into Xvfb rather than the real Plasma/Wayland display. There is therefore no service-browser taskbar entry, Alt+Tab entry, Overview window or startup flash.
 
-Only after **«Евгениум слушай»** does EGL launch the dedicated Chromium profile and attempt to open ChatGPT Voice. If ChatGPT cannot be reached, EGL:
+The visible browser is used only by `egl setup`, when the user intentionally needs to log in or choose another chat.
 
-1. shows an error state/desktop notification;
-2. closes the failed service browser;
-3. returns to local wake-word waiting;
-4. **does not repeatedly retry the network request in a loop**.
+## VPN / network resilience
 
-When VPN/network becomes available, say **«Евгениум слушай»** again.
+The Chromium process and its tab are local and stay alive even when ChatGPT is unreachable.
 
-The microphone listener has its own bounded retry loop (2 seconds up to 30 seconds), so a late PipeWire/audio device during login does not require restarting EGL.
+If EGL starts while VPN is off:
 
-`egl.service` restarts on genuine daemon crashes, but systemd limits repeated crashes to 5 starts in 5 minutes instead of spinning forever.
+1. Xvfb and Chromium still start normally;
+2. the remembered ChatGPT tab remains open;
+3. EGL periodically retries **loading the page in the same tab** with backoff up to 60 seconds;
+4. it does **not** repeatedly kill/relaunch Chromium;
+5. when VPN becomes available, the background readiness loop discovers the Voice button and moves to `idle_ready`.
 
-## KDE Plasma hidden service browser
+An explicit **«Евгениум слушай»** also performs one immediate readiness attempt. If ChatGPT is still unavailable, EGL shows an error/notification but leaves the hidden browser alive and continues recovering in the background.
 
-Runtime Chromium starts with the Linux window class `EvgeniumGPT` and `--start-minimized`.
+If Chromium or Xvfb genuinely crashes, EGL restarts that browser stack with bounded backoff.
 
-EGL installs a tiny KWin script:
+## Why Xvfb instead of merely minimizing Chromium
+
+KWin rules can hide a window from taskbar/pager/switcher, but they cannot guarantee zero visible startup flash on every Wayland/Chromium combination.
+
+EGL 0.5 therefore moves runtime Chromium completely off the real desktop. The older KWin integration remains harmless as a fallback/legacy integration, but the normal runtime window never reaches KWin at all.
+
+On Arch the installer adds:
 
 ```text
-~/.local/share/kwin/scripts/eglwindowguard/
+xorg-server-xvfb
 ```
-
-It matches **only** the EGL-specific Chromium class and sets:
-
-- `skipTaskbar`;
-- `skipPager`;
-- `skipSwitcher`;
-- minimized state.
-
-So normal Chromium/Chrome windows are not affected.
-
-You can explicitly reveal or hide the service browser:
-
-```bash
-egl browser show
-egl browser hide
-```
-
-The GUI exposes the same controls.
 
 ## GUI settings
 
@@ -95,29 +86,27 @@ The installer adds **Evgenium GPT LIVE** to the Plasma application menu. You can
 egl gui
 ```
 
-The current GUI includes:
+The GUI currently includes:
 
 - daemon/systemd state;
 - manual Voice start/stop;
-- show/hide service Chromium;
+- manual reload of the permanent hidden ChatGPT tab;
 - microphone selection;
 - live microphone level test;
 - enable/disable the live orb;
 - orb size;
-- background/hidden Chromium toggle;
-- keep Chromium alive after a completed Voice conversation;
 - remembered ChatGPT chat URL;
 - save + automatic EGL service restart.
 
-New installs use the **system default microphone** during setup. Device selection is intentionally moved to the GUI.
+The runtime-browser policy is intentionally no longer a toggle: **it is always permanent and always hidden**.
 
 ## First setup and authentication
 
-EGL uses a normal system Chromium-family browser with a dedicated clean profile. During the human login/Cloudflare flow, Playwright is **not attached**. After you log in and open the desired chat, EGL attaches via the local DevTools/CDP endpoint and remembers that chat.
+EGL uses a normal visible system Chromium-family browser for first authentication. During the human login/Cloudflare flow Playwright is **not attached**. After you log in and open the desired chat, EGL attaches through the local DevTools/CDP endpoint, remembers that chat and closes the setup browser.
+
+After that, the systemd daemon opens the same persistent profile on the private Xvfb display.
 
 EGL does not attempt to bypass CAPTCHA or Cloudflare verification.
-
-On Arch, if Chromium/Chrome/Brave/Vivaldi is not already installed, the bootstrap installs `chromium`.
 
 ## Files
 
@@ -130,21 +119,18 @@ On Arch, if Chromium/Chrome/Brave/Vivaldi is not already installed, the bootstra
 ├── data/
 │   ├── browser-profile-system/
 │   └── models/
-├── kde/
-│   └── kwin/eglwindowguard/
 ├── state/
 ├── src/
 ├── bootstrap.sh
 └── install.sh
 ```
 
-Linux integration files intentionally live in their standard locations:
+Standard Linux integration files live in their normal locations:
 
 ```text
 ~/.config/systemd/user/egl.service
 ~/.local/bin/egl
 ~/.local/share/applications/egl-settings.desktop
-~/.local/share/kwin/scripts/eglwindowguard/
 ```
 
 Temporary IPC can live in `$XDG_RUNTIME_DIR/egl`.
@@ -153,30 +139,28 @@ Temporary IPC can live in `$XDG_RUNTIME_DIR/egl`.
 
 ```bash
 egl gui                 # settings application
-egl doctor              # dependency/autostart/Plasma diagnostics
-egl status              # current daemon state
+egl doctor              # dependency/autostart/browser diagnostics
+egl status              # idle_ready / idle_loading / listening / ...
 egl wake                # manually start Voice
 egl stop                # force-stop Voice
-egl browser show        # reveal dedicated Chromium
-egl browser hide        # minimize it again
-egl integration status
+egl browser reload      # force-reload the permanent hidden tab
 egl service status
 egl service restart
 egl service logs
 egl setup               # intentionally re-run ChatGPT login/chat selection
 ```
 
+`egl browser show/hide` are retained only for 0.4 CLI compatibility; the 0.5 runtime browser lives on a private display and is intentionally not exposable to Plasma.
+
 ## Live orb
 
 The orb is independent of Chromium:
 
-- starting state while Voice is opening;
+- starting state while Voice is being entered;
 - active state while Voice is live;
-- error state if browser/network automation fails;
+- error state when Voice cannot be entered;
 - breathing animation at minimum;
 - when `parec` is available, its size follows default desktop output volume.
-
-The current audio meter watches the default output sink, not only ChatGPT audio.
 
 ## About «Евгениум» recognition
 
@@ -187,36 +171,38 @@ The configured phrases are:
 Евгениум стоп
 ```
 
-Vosk uses a very restricted Russian grammar. A few acoustic aliases such as «Евгений» are accepted internally because «Евгениум» is invented. The hotword layer is isolated from browser control.
+Vosk uses a restricted Russian grammar. A few acoustic aliases such as «Евгений» are accepted internally because «Евгениум» is invented. The hotword layer is isolated from browser control.
 
 ## Browser automation caveat
 
-ChatGPT Web does not expose EGL with a public `startVoice()` API. EGL therefore controls the normal Voice/Exit UI through DOM selectors in `src/egl/browser.py`.
+ChatGPT Web does not expose EGL with a public `startVoice()` API. EGL controls the normal Voice/Exit UI through DOM selectors in `src/egl/browser.py`.
 
-The browser process itself is launched directly as a normal system Chromium-family browser. Playwright is only the local CDP control client.
+The important 0.5 change is that those selectors now operate on an already-loaded long-lived page. `start_voice()` also waits for the Voice button before clicking, so a slow render no longer produces the old startup race.
 
-## Diagnostics and reboot test
+## Reboot / VPN test
 
-After an update:
+After updating:
 
 ```bash
+egl --version
 egl doctor
-systemctl --user status egl.service
+egl status
 ```
 
-For the real reboot test:
+Expected test:
 
-1. update to the latest `main`;
-2. leave VPN **off**;
-3. reboot/login to Plasma;
-4. run `egl status` — it should report `idle` without Chromium being visible;
-5. say **«Евгениум слушай»** while VPN is off — EGL should fail once and return to idle;
-6. enable VPN;
-7. say **«Евгениум слушай»** again — Voice should start without restarting the daemon.
+1. leave VPN **off** and reboot;
+2. after Plasma login, no Chromium window should ever appear;
+3. `egl status` should show `idle_loading` or `idle_ready` rather than a dead service;
+4. enable VPN without restarting EGL;
+5. within the background retry interval, status should become `idle_ready`;
+6. say **«Евгениум слушай»** — Voice should start from the already-running tab;
+7. say **«Евгениум стоп»** — Voice stops, but hidden Chromium remains alive;
+8. call again — there should be no browser startup flash or page-load race.
 
 ## CI
 
-`.github/workflows/ci.yml` checks Python 3.11 and 3.14, shell/JSON/KWin-JavaScript syntax, imports the GUI/runtime modules, runs unit tests/compile checks and performs a normal-Chromium CDP smoke test under Xvfb.
+`.github/workflows/ci.yml` checks Python 3.11 and 3.14, shell/JSON/KWin-JavaScript syntax, GUI/runtime imports, unit tests/compile checks and a smoke test that lets **EGL itself** create a private Xvfb server, launch system Chromium on it and attach through CDP.
 
 ## Development
 
