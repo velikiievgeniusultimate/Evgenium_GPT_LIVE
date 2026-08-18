@@ -2,14 +2,14 @@
 
 **EGL** turns the regular ChatGPT **Web Voice** session into a Linux-native voice assistant with local wake/stop phrases, a persistent authenticated browser profile, autostart, GUI settings, live debugging and a desktop orb.
 
-Current version: **0.5.1**. Arch Linux + KDE Plasma is the primary target.
+Current version: **0.5.2**. Arch Linux + KDE Plasma is the primary target.
 
 ## What it should feel like
 
 - EGL starts with the desktop and immediately keeps one authenticated ChatGPT tab alive in the background;
 - that Chromium window lives on a **private Xvfb virtual display**, so Plasma never sees it;
 - say **«Евгениум слушай»** → EGL clicks Voice in the already-loaded tab;
-- say **«Евгениум стоп»** → EGL exits Voice but keeps the same Chromium process and chat tab alive;
+- say **«Евгениум стоп»** → EGL aggressively terminates Voice but keeps Chromium/profile alive;
 - open **Evgenium GPT LIVE** from the application launcher for settings and debugging.
 
 ## One-line install / update
@@ -21,7 +21,7 @@ curl -fsSL "https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_G
 You should see:
 
 ```text
-[EGL] Evgenium GPT LIVE bootstrap v0.5.1
+[EGL] Evgenium GPT LIVE bootstrap v0.5.2
 [EGL] Target ref: main
 [EGL] Install directory: /home/.../Evgenium_GPT
 ```
@@ -47,7 +47,109 @@ EGL daemon
 
 The runtime Chromium is a normal headed browser for WebRTC/audio reliability, but it renders into Xvfb instead of the real Plasma/Wayland display. There is therefore no taskbar entry, Alt+Tab entry, Overview window or startup flash.
 
-The visible browser is used only by `egl setup`, when the user intentionally logs in or chooses another chat.
+## Strict wake / aggressive STOP
+
+EGL 0.5.2 deliberately treats wake and stop very differently.
+
+### Wake
+
+Wake is conservative:
+
+- the old soft aliases such as `евгений слушай` and `евгениум слушает` are removed;
+- only the configured canonical phrase is accepted;
+- **partial Vosk results can never start Voice**;
+- the phrase must appear in a final Vosk result;
+- Vosk word confidences are enabled and the minimum confidence of all decoded words must pass the configured threshold;
+- default wake threshold: **86%**.
+
+This specifically prevents the old failure mode where a transient partial hypothesis could accidentally wake EGL before Vosk finished decoding the utterance.
+
+### STOP
+
+STOP is intentionally aggressive because a false stop is much less harmful than a Voice session that refuses to die:
+
+- STOP can fire from a **partial** Vosk result while Voice is active;
+- audio blocks are reduced to 100 ms for lower detection latency;
+- default STOP confidence threshold is only **35%**;
+- one STOP is emitted per Voice session;
+- STOP has no shared debounce with wake.
+
+Both thresholds and both canonical phrases are editable in the GUI. Saving settings restarts the EGL daemon so the new Vosk grammar is applied immediately.
+
+## Aggressive browser STOP pipeline
+
+The browser stop path no longer waits several seconds for ChatGPT to cooperate.
+
+```text
+STOP detected
+    ↓
+Exit click
+    ↓  max ~0.55 s
+Voice UI gone? ── yes → done
+    │ no
+    ▼
+force navigation to remembered chat
+    ↓
+still stuck?
+    ▼
+destroy Voice tab + create replacement tab
+```
+
+The last fallback destroys the page that owns the WebRTC session while keeping the same Chromium process, profile and authentication alive. The replacement tab then warms back up in the background.
+
+The daemon also stops waiting for the composer to fully reload before acknowledging STOP: the live orb disappears as soon as STOP reaches the daemon, and page readiness recovery happens separately.
+
+## GUI settings and live debugger
+
+Open **Evgenium GPT LIVE** from Plasma or run:
+
+```bash
+egl gui
+```
+
+The main GUI includes:
+
+- daemon/systemd state;
+- manual Voice start and emergency STOP;
+- manual reload of the permanent hidden ChatGPT tab;
+- microphone selection and live level test;
+- editable wake and STOP phrases;
+- wake confidence threshold;
+- STOP confidence threshold;
+- live orb settings;
+- **Открыть отладчик** button.
+
+The debugger shows the full recognition/stop pipeline. For each Vosk hypothesis it shows:
+
+- recognized text;
+- final vs partial;
+- word-confidence floor;
+- `wake_match` / `stop_match`;
+- whether it was accepted;
+- rejection/acceptance reason.
+
+STOP has its own prominent status line:
+
+```text
+STOP: DETECTED → SENT → CONFIRMED
+method=exit_click | 143 ms | UI after=false
+```
+
+or, when ChatGPT resists:
+
+```text
+STOP: DETECTED → SENT → CONFIRMED
+method=forced_navigation | 721 ms | UI after=false
+```
+
+and the final destructive fallback is reported as `tab_replaced`.
+
+Debug data is stored under:
+
+```text
+~/Evgenium_GPT/state/debug.jsonl
+~/Evgenium_GPT/state/debug-browser.png
+```
 
 ## VPN / network resilience
 
@@ -62,70 +164,6 @@ If EGL starts while VPN is off:
 5. when VPN becomes available, the readiness loop discovers the Voice button and moves to `idle_ready`.
 
 If Chromium or Xvfb genuinely crashes, EGL restarts that browser stack with bounded backoff.
-
-## GUI settings and live debugger
-
-Open **Evgenium GPT LIVE** from Plasma or run:
-
-```bash
-egl gui
-```
-
-The main GUI includes:
-
-- daemon/systemd state;
-- manual Voice start/stop;
-- manual reload of the permanent hidden ChatGPT tab;
-- microphone selection;
-- live microphone level test;
-- live orb settings;
-- remembered ChatGPT chat URL;
-- **Открыть отладчик** button.
-
-The debugger is specifically meant for diagnosing wake/stop behavior. It shows:
-
-- a live screenshot of the otherwise invisible Xvfb ChatGPT tab;
-- current EGL state;
-- the last text Vosk recognized;
-- whether that text matched wake or stop aliases;
-- whether EGL believed Voice was active when the phrase arrived;
-- a structured event timeline;
-- manual Wake / STOP / Reload / Screenshot controls;
-- the result of the last STOP verification.
-
-Example stop trace:
-
-```text
-hotword_heard: евгениум стоп {voice_active:true, stop_match:true}
-command_received: stop
-voice_stop_begin: ... {ui_active_before:true}
-voice_stopped: ... {verified:true, ui_active_after:false}
-```
-
-Debug data is stored under:
-
-```text
-~/Evgenium_GPT/state/debug.jsonl
-~/Evgenium_GPT/state/debug-browser.png
-```
-
-The log is automatically bounded so it does not grow forever.
-
-## Verified STOP behavior
-
-EGL 0.5.1 no longer treats `stop_voice()` as fire-and-forget.
-
-After receiving STOP it:
-
-1. records the recognized phrase and match result;
-2. sends the Exit click;
-3. waits for the Voice UI to disappear;
-4. if that does not happen, navigates the permanent tab back to the remembered chat as a fallback;
-5. verifies the final UI state;
-6. writes `verified=true/false` into the debugger;
-7. captures a post-stop screenshot.
-
-Manual GUI/CLI STOP is processed even if EGL's internal `voice_active` flag is already false. This makes it useful as both an emergency stop and a way to detect state desynchronization.
 
 ## First setup and authentication
 
@@ -169,8 +207,8 @@ Standard Linux integration files live in their normal locations:
 egl gui                 # settings + debugger
 egl doctor              # dependency/autostart/browser diagnostics
 egl status              # idle_ready / idle_loading / listening / ...
-egl wake                # manually start Voice
-egl stop                # force + verify Voice stop
+egl wake                # manual start bypassing speech recognition
+egl stop                # aggressive emergency STOP
 egl browser reload      # force-reload the permanent hidden tab
 egl service status
 egl service restart
@@ -178,34 +216,13 @@ egl service logs
 egl setup               # intentionally re-run ChatGPT login/chat selection
 ```
 
-## Live orb
-
-The orb is independent of Chromium:
-
-- starting state while Voice is being entered;
-- active state while Voice is live;
-- error state when Voice cannot be entered;
-- breathing animation at minimum;
-- when `parec` is available, its size follows default desktop output volume.
-
-## About «Евгениум» recognition
-
-The configured phrases are:
-
-```text
-Евгениум слушай
-Евгениум стоп
-```
-
-Vosk uses a restricted Russian grammar. A few acoustic aliases such as «Евгений» are accepted internally because «Евгениум» is invented. The debugger exposes exactly what Vosk recognized and which alias matched.
-
 ## Browser automation caveat
 
-ChatGPT Web does not expose EGL with a public `startVoice()` API. EGL controls the normal Voice/Exit UI through DOM selectors in `src/egl/browser.py`.
+ChatGPT Web does not expose EGL with a public `startVoice()` / `stopVoice()` API. EGL controls the normal Voice/Exit UI through DOM selectors in `src/egl/browser.py`.
 
-Those selectors operate on an already-loaded long-lived page. `start_voice()` waits for readiness, while `stop_voice()` now verifies the exit and falls back to returning to the remembered chat if needed.
+Because STOP has destructive navigation/tab-replacement fallbacks, a changed Exit selector should no longer leave a Voice session running indefinitely.
 
-## Reboot / VPN test
+## Reboot / STOP test
 
 After updating:
 
@@ -217,15 +234,13 @@ egl status
 
 Expected flow:
 
-1. leave VPN off and reboot;
-2. after Plasma login no Chromium window should appear;
-3. `egl status` should show `idle_loading` or `idle_ready`;
-4. enable VPN without restarting EGL;
-5. wait for `idle_ready`;
-6. open the GUI debugger;
-7. say **«Евгениум слушай»** and watch the event trace + hidden tab preview;
-8. say **«Евгениум стоп»**;
-9. confirm the debugger shows `stop_match=true`, `verified=true`, `ui_active_after=false` and the screenshot is back on the normal chat page.
+1. open the GUI debugger;
+2. speak ordinary background phrases for a while — partial `wake_match` observations must not trigger Voice;
+3. say **«Евгениум слушай»** clearly — debugger should show a final result above the wake threshold followed by `WAKE_ACCEPTED`;
+4. while Voice is active say **«Евгениум стоп»**;
+5. the orb should disappear immediately;
+6. debugger should show `STOP_DETECTED → STOP_SENT → STOP_CONFIRMED`;
+7. inspect `stop_method` and `total_stop_ms` to see exactly how ChatGPT was terminated.
 
 ## CI
 
