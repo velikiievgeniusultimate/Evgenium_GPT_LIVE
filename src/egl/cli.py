@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = sub.add_parser("setup", help="first-time login, chat selection and model setup")
     setup.add_argument("--no-service", action="store_true", help="do not install/start systemd user service")
+    sub.add_parser("doctor", help="check EGL dependencies, browser, audio and configuration")
     sub.add_parser("daemon", help="run EGL in foreground")
     sub.add_parser("wake", help="manually start ChatGPT Voice")
     sub.add_parser("stop", help="manually stop ChatGPT Voice")
@@ -42,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "setup":
         from .setup_wizard import run_setup
         return run_setup(install_autostart=not args.no_service)
+    if args.command == "doctor":
+        from .doctor import run_doctor
+        return run_doctor()
     if args.command == "daemon":
         from .daemon import run_daemon
         return run_daemon()
