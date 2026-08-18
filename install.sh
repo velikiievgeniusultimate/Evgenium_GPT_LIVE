@@ -47,19 +47,10 @@ for name in mods:
     print(f"  OK {name}")
 PY
 
-say "Installing compatible Playwright Chromium"
-"$VENV/bin/python" -m playwright install chromium
-
-# `sync_playwright()` on Python 3.14 can emit noisy asyncio teardown warnings
-# even when merely reading chromium.executable_path. The Playwright CLI has an
-# official installed-browser listing, so use that for the installation check.
-say "Checking Playwright browser"
-BROWSER_LIST="$($VENV/bin/python -m playwright install --list)"
-printf '%s\n' "$BROWSER_LIST"
-if ! grep -qi 'chromium' <<<"$BROWSER_LIST"; then
-  die "Playwright did not report an installed Chromium browser."
-fi
-
+# EGL 0.3+ does not launch Playwright's Chrome for Testing. Playwright is used
+# only as a CDP client attached to the normal system Chromium/Chrome process.
+# This avoids downloading ~300 MB of test-browser binaries and makes first-time
+# ChatGPT authentication happen in a normal browser.
 ln -sfn "$VENV/bin/egl" "$BIN_DIR/egl"
 
 export EGL_HOME
