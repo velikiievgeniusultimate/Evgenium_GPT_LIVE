@@ -8,13 +8,22 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .phrases import phrase_matches
+from .phrases import normalize_phrase, phrase_matches
 
 LOG = logging.getLogger(__name__)
 
+DebugCallback = Callable[[dict[str, object]], None]
+
 
 class HotwordListener:
-    """Offline, grammar-limited Russian phrase detector using Vosk."""
+    """Offline Russian wake/stop detector using Vosk.
+
+    Wake and stop are intentionally asymmetric:
+    - WAKE is conservative: exact canonical phrase, FINAL result only, and a
+      strong per-word confidence floor.
+    - STOP is aggressive: while Voice is active it may fire from a partial
+      result as soon as the complete stop phrase is present.
+    """
 
     def __init__(
         self,
@@ -24,7 +33,9 @@ class HotwordListener:
         on_wake: Callable[[], None],
         on_stop: Callable[[], None],
         microphone_device: int | None = None,
-        on_debug: Callable[[str, bool, bool, bool], None] | None = None,
+        on_debug: DebugCallback | None = None,
+        wake_confidence_threshold: float = 0.86,
+        stop_confidence_threshold: float = 0.35,
     ) -> None:
         self.model_path = model_path
         self.wake_aliases = wake_aliases
@@ -33,17 +44,19 @@ class HotwordListener:
         self.on_stop = on_stop
         self.microphone_device = microphone_device
         self.on_debug = on_debug
+        self.wake_confidence_threshold = float(wake_confidence_threshold)
+        self.stop_confidence_threshold = float(stop_confidence_threshold)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._active = threading.Event()
-        # Wake and stop need independent debounce clocks. A stop spoken soon
-        # after wake must never be suppressed by the wake trigger itself.
         self._last_wake_trigger = 0.0
-        self._last_stop_trigger = 0.0
-        self._last_debug_text = ""
+        self._stop_fired_for_session = False
+        self._last_debug_key: tuple[object, ...] | None = None
 
     def set_voice_active(self, active: bool) -> None:
         if active:
+            if not self._active.is_set():
+                self._stop_fired_for_session = False
             self._active.set()
         else:
             self._active.clear()
@@ -59,26 +72,130 @@ class HotwordListener:
         if self._thread:
             self._thread.join(timeout=2)
 
-    def _dispatch(self, text: str) -> None:
-        active = self._active.is_set()
-        wake_match = phrase_matches(text, self.wake_aliases)
-        stop_match = phrase_matches(text, self.stop_aliases)
-
-        if self.on_debug is not None and text != self._last_debug_text:
-            self._last_debug_text = text
+    @staticmethod
+    def _confidence(payload: dict[str, object], *, final: bool) -> float | None:
+        key = "result" if final else "partial_result"
+        raw_words = payload.get(key)
+        if not isinstance(raw_words, list) or not raw_words:
+            return None
+        values: list[float] = []
+        for item in raw_words:
+            if not isinstance(item, dict):
+                continue
             try:
-                self.on_debug(text, active, wake_match, stop_match)
-            except Exception:
-                LOG.debug("Hotword debug callback failed", exc_info=True)
+                values.append(float(item["conf"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # Minimum word confidence is deliberately harsher than an average: one
+        # uncertain word is enough to reject a wake phrase.
+        return min(values) if values else None
 
+    def _emit_debug(
+        self,
+        *,
+        text: str,
+        final: bool,
+        confidence: float | None,
+        wake_match: bool,
+        stop_match: bool,
+        accepted: str | None,
+        reason: str,
+    ) -> None:
+        if self.on_debug is None:
+            return
+        active = self._active.is_set()
+        key = (
+            text,
+            final,
+            None if confidence is None else round(confidence, 3),
+            active,
+            wake_match,
+            stop_match,
+            accepted,
+            reason,
+        )
+        if key == self._last_debug_key:
+            return
+        self._last_debug_key = key
+        try:
+            self.on_debug(
+                {
+                    "text": text,
+                    "voice_active": active,
+                    "final": final,
+                    "confidence": confidence,
+                    "wake_match": wake_match,
+                    "stop_match": stop_match,
+                    "accepted": accepted,
+                    "reason": reason,
+                    "wake_threshold": self.wake_confidence_threshold,
+                    "stop_threshold": self.stop_confidence_threshold,
+                }
+            )
+        except Exception:
+            LOG.debug("Hotword debug callback failed", exc_info=True)
+
+    def _dispatch(
+        self,
+        text: str,
+        *,
+        final: bool = True,
+        confidence: float | None = 1.0,
+    ) -> None:
+        normalized = normalize_phrase(text)
+        active = self._active.is_set()
+
+        # Wake is EXACT, not suffix/fuzzy matching. 0.5.2 deliberately removes
+        # the previous phonetic aliases and partial-result wake path.
+        canonical_wake = normalize_phrase(self.wake_aliases[0]) if self.wake_aliases else ""
+        wake_match = bool(canonical_wake and normalized == canonical_wake)
+
+        # Stop is allowed to be a suffix so a partial decoder that carries a
+        # tiny amount of preceding speech can still terminate Voice instantly.
+        stop_match = phrase_matches(normalized, self.stop_aliases)
+
+        accepted: str | None = None
+        reason = "no_match"
         now = time.monotonic()
+
         if active:
-            if stop_match and now - self._last_stop_trigger >= 1.2:
-                self._last_stop_trigger = now
+            confidence_ok = confidence is None or confidence >= self.stop_confidence_threshold
+            if stop_match and confidence_ok and not self._stop_fired_for_session:
+                self._stop_fired_for_session = True
+                accepted = "stop"
+                reason = "partial_fast_stop" if not final else "final_stop"
+                # Queue STOP before doing anything expensive. This is the
+                # lowest-latency path in the entire listener.
                 self.on_stop()
-        elif wake_match and now - self._last_wake_trigger >= 1.5:
-            self._last_wake_trigger = now
-            self.on_wake()
+            elif stop_match and self._stop_fired_for_session:
+                reason = "stop_already_fired"
+            elif stop_match:
+                reason = "stop_confidence_too_low"
+        else:
+            if not final and wake_match:
+                reason = "wake_partial_rejected"
+            elif final and wake_match:
+                if confidence is None:
+                    reason = "wake_missing_confidence"
+                elif confidence < self.wake_confidence_threshold:
+                    reason = "wake_confidence_too_low"
+                elif now - self._last_wake_trigger < 1.5:
+                    reason = "wake_debounce"
+                else:
+                    self._last_wake_trigger = now
+                    accepted = "wake"
+                    reason = "strict_final_wake"
+                    self.on_wake()
+
+        self._emit_debug(
+            text=normalized,
+            final=final,
+            confidence=confidence,
+            wake_match=wake_match,
+            stop_match=stop_match,
+            accepted=accepted,
+            reason=reason,
+        )
 
     def _run(self) -> None:
         try:
@@ -96,7 +213,15 @@ class HotwordListener:
         while not self._stop.is_set():
             try:
                 recognizer = KaldiRecognizer(model, 16000, json.dumps(grammar, ensure_ascii=False))
-                audio_q: queue.Queue[bytes] = queue.Queue(maxsize=12)
+                # Vosk exposes per-word confidences in both final and partial
+                # results when these flags are enabled.
+                recognizer.SetWords(True)
+                try:
+                    recognizer.SetPartialWords(True)
+                except AttributeError:
+                    LOG.warning("This Vosk build lacks SetPartialWords; STOP will still use exact partial text")
+
+                audio_q: queue.Queue[bytes] = queue.Queue(maxsize=20)
 
                 def callback(indata, frames, time_info, status):  # type: ignore[no-untyped-def]
                     if status:
@@ -108,27 +233,47 @@ class HotwordListener:
 
                 with sd.RawInputStream(
                     samplerate=16000,
-                    blocksize=4000,
+                    # 100 ms blocks make STOP noticeably more immediate than
+                    # the previous 250 ms blocks while remaining lightweight.
+                    blocksize=1600,
                     dtype="int16",
                     channels=1,
                     device=self.microphone_device,
                     callback=callback,
                 ):
-                    LOG.info("Hotword listener ready (device=%s)", self.microphone_device)
+                    LOG.info(
+                        "Hotword listener ready (device=%s, wake>=%.2f final-only, stop>=%.2f partial-ok)",
+                        self.microphone_device,
+                        self.wake_confidence_threshold,
+                        self.stop_confidence_threshold,
+                    )
                     retry_delay = 2.0
                     while not self._stop.is_set():
                         try:
-                            chunk = audio_q.get(timeout=0.25)
+                            chunk = audio_q.get(timeout=0.20)
                         except queue.Empty:
                             continue
+
                         if recognizer.AcceptWaveform(chunk):
-                            text = json.loads(recognizer.Result()).get("text", "")
+                            payload = json.loads(recognizer.Result())
+                            text = str(payload.get("text", ""))
                             if text:
-                                self._dispatch(text)
+                                self._dispatch(
+                                    text,
+                                    final=True,
+                                    confidence=self._confidence(payload, final=True),
+                                )
                         else:
-                            partial = json.loads(recognizer.PartialResult()).get("partial", "")
+                            payload = json.loads(recognizer.PartialResult())
+                            partial = str(payload.get("partial", ""))
                             if partial:
-                                self._dispatch(partial)
+                                # Partial results are diagnostic-only for wake,
+                                # but are the primary fast path for STOP.
+                                self._dispatch(
+                                    partial,
+                                    final=False,
+                                    confidence=self._confidence(payload, final=False),
+                                )
             except Exception:
                 LOG.exception(
                     "Hotword audio stream failed; retrying in %.0f seconds",
