@@ -13,11 +13,6 @@ DEFAULT_BROWSER_PROFILE_DIRNAME = "browser-profile-system"
 
 
 def app_home() -> Path:
-    """Return EGL's main home directory.
-
-    EGL intentionally keeps almost all persistent project/runtime data in one
-    visible directory so installation, backup and removal are predictable.
-    """
     return Path(os.environ.get("EGL_HOME", str(Path.home() / "Evgenium_GPT"))).expanduser()
 
 
@@ -57,8 +52,8 @@ class EGLConfig:
     vosk_model_url: str = DEFAULT_MODEL_URL
     vosk_model_path: str = ""
     browser_profile_path: str = ""
-    # Historical name retained for compatibility. True now means "background
-    # browser": normal headed Chromium, minimized/hidden from Plasma surfaces.
+    # Kept in config for backward compatibility with 0.4. EGL 0.5 enforces
+    # both values: runtime Chromium is always background/hidden and long-lived.
     browser_headless: bool = True
     browser_keep_alive: bool = True
     microphone_device: int | None = None
@@ -77,6 +72,9 @@ class EGLConfig:
     def from_dict(cls, raw: dict[str, Any]) -> "EGLConfig":
         defaults = asdict(cls.default())
         defaults.update(raw)
+        # Migrate old 0.4 user choices to the fixed 0.5 runtime invariant.
+        defaults["browser_headless"] = True
+        defaults["browser_keep_alive"] = True
         return cls(**defaults)
 
 
@@ -99,6 +97,10 @@ def load_config() -> EGLConfig:
 
 def save_config(cfg: EGLConfig) -> Path:
     ensure_dirs()
+    # Do not let old callers persist a configuration that violates 0.5's
+    # permanent-hidden-browser contract.
+    cfg.browser_headless = True
+    cfg.browser_keep_alive = True
     path = config_path()
     tmp = path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
