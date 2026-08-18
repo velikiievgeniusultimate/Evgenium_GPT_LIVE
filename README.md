@@ -2,7 +2,7 @@
 
 **EGL** turns the regular ChatGPT **Web Voice** session into a Linux-native voice assistant with local wake/stop phrases, a persistent authenticated browser profile, autostart, GUI settings, live debugging and a desktop orb.
 
-Current version: **0.5.4**. Arch Linux + KDE Plasma is the primary target.
+Current version: **0.5.5**. Arch Linux + KDE Plasma is the primary target.
 
 ## What it should feel like
 
@@ -10,6 +10,7 @@ Current version: **0.5.4**. Arch Linux + KDE Plasma is the primary target.
 - that Chromium window lives on a **private Xvfb virtual display**, so Plasma never sees it;
 - say **«Евгениум слушай»** → EGL clicks Voice in the already-loaded tab;
 - say **«Евгениум стоп»** → EGL aggressively terminates Voice but keeps Chromium/profile alive;
+- assistant playback volume is independently adjustable from the EGL GUI;
 - open **Evgenium GPT LIVE** from the application launcher for settings and debugging.
 
 ## One-line install / update
@@ -21,7 +22,7 @@ curl -fsSL "https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_G
 You should see:
 
 ```text
-[EGL] Evgenium GPT LIVE bootstrap v0.5.4
+[EGL] Evgenium GPT LIVE bootstrap v0.5.5
 [EGL] Target ref: main
 [EGL] Install directory: /home/.../Evgenium_GPT
 ```
@@ -65,7 +66,7 @@ Wake is conservative:
 
 `Евгениум` is intentionally an invented word. Stock Vosk Russian models may not contain it in their vocabulary. Runtime Vosk grammars silently ignore words that are missing from the model vocabulary, which made the literal strict phrase impossible to decode in EGL 0.5.2/0.5.3.
 
-EGL 0.5.4 keeps **«Евгениум слушай»** and **«Евгениум стоп»** as the user-facing commands, but checks the Vosk vocabulary at startup. If `евгениум` is out-of-vocabulary, EGL maps only that token to the explicit acoustic surrogate `евгений` for the decoder:
+EGL keeps **«Евгениум слушай»** and **«Евгениум стоп»** as the user-facing commands, but checks the Vosk vocabulary at startup. If `евгениум` is out-of-vocabulary, EGL maps only that token to the explicit acoustic surrogate `евгений` for the decoder:
 
 ```text
 User says / GUI shows:  евгениум слушай
@@ -75,7 +76,7 @@ User says / GUI shows:  евгениум стоп
 Vosk decoder expects:   евгений стоп
 ```
 
-This does **not** restore the old broad soft aliases: only a phrase that can be represented by the model through an explicit word-level mapping is put into the grammar, and wake still requires a FINAL high-confidence exact match.
+This does **not** restore broad soft aliases: only an explicit word-level mapping is placed into the grammar, and wake still requires a FINAL high-confidence exact match.
 
 `egl doctor` validates this mapping against the installed Vosk model and prints the actual decoder phrases.
 
@@ -96,6 +97,19 @@ Both thresholds and both user-facing phrases are editable in the GUI. Saving set
 EGL does not force hardware microphones to 16 kHz. USB/pro-audio interfaces may expose only 44.1/48 kHz through PortAudio.
 
 EGL probes the selected input device, picks an accepted native/common sample rate and passes the actual stream rate to Vosk. The GUI microphone test uses the same device/rate resolver, and `egl doctor` reports the selected device and usable rate.
+
+## Assistant playback volume
+
+EGL 0.5.5 adds a dedicated **Громкость голосового помощника** slider to the GUI.
+
+- range: **0–150%**;
+- 100% is normal playback level;
+- values above 100% use software amplification and can clip/distort;
+- changing the slider while Voice is active applies the new level immediately when the EGL audio stream is present;
+- the saved value is automatically applied after every future Voice start;
+- EGL tags the hidden Chromium playback stream with its own PulseAudio/PipeWire application name and changes only matching sink-inputs, not the desktop master volume or unrelated Chromium windows.
+
+The setting is stored as `assistant_volume_percent` in `~/Evgenium_GPT/config/config.json`.
 
 ## Aggressive browser STOP pipeline
 
@@ -134,6 +148,7 @@ The main GUI includes:
 - manual Voice start and emergency STOP;
 - manual reload of the permanent hidden ChatGPT tab;
 - microphone selection and live level test;
+- assistant playback volume slider with live application;
 - editable wake and STOP phrases;
 - wake confidence threshold;
 - STOP confidence threshold;
@@ -266,10 +281,10 @@ Then:
 1. open the GUI debugger;
 2. speak ordinary background phrases for a while — partial wake observations must not trigger Voice;
 3. say **«Евгениум слушай»** clearly — debugger should eventually show the decoder surrogate with a final result above the wake threshold followed by `WAKE_ACCEPTED`;
-4. while Voice is active say **«Евгениум стоп»**;
-5. the orb should disappear immediately;
-6. debugger should show `STOP_DETECTED → STOP_SENT → STOP_CONFIRMED`;
-7. inspect `stop_method` and `total_stop_ms` to see exactly how ChatGPT was terminated.
+4. while Voice is active move the assistant volume slider and verify only the EGL voice changes;
+5. say **«Евгениум стоп»**;
+6. the orb should disappear immediately;
+7. debugger should show `STOP_DETECTED → STOP_SENT → STOP_CONFIRMED`.
 
 ## CI
 
