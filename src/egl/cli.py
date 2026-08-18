@@ -29,8 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stop", help="manually stop ChatGPT Voice")
     sub.add_parser("status", help="show current EGL state")
 
-    browser = sub.add_parser("browser", help="show/hide the dedicated service Chromium")
-    browser.add_argument("action", choices=["show", "hide"])
+    browser = sub.add_parser("browser", help="manage the permanent hidden ChatGPT tab")
+    browser.add_argument("action", choices=["reload", "show", "hide"])
 
     integration = sub.add_parser("integration", help="install desktop/KDE integration")
     integration.add_argument("action", choices=["install", "status"])
