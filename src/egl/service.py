@@ -5,9 +5,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .config import app_home
+
 
 def unit_path() -> Path:
     return Path.home() / ".config/systemd/user/egl.service"
+
+
+def _systemd_quote(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def install_service(enable: bool = True) -> Path:
@@ -19,6 +25,10 @@ def install_service(enable: bool = True) -> Path:
         if candidate.exists():
             executable = candidate
 
+    egl_home = app_home().resolve()
+    executable_text = _systemd_quote(str(executable))
+    home_text = _systemd_quote(str(egl_home))
+
     unit = f"""[Unit]
 Description=Evgenium GPT LIVE (EGL)
 After=network-online.target pipewire.service pipewire-pulse.service
@@ -26,10 +36,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={executable} daemon
+ExecStart=\"{executable_text}\" daemon
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Environment=\"EGL_HOME={home_text}\"
 
 [Install]
 WantedBy=default.target
