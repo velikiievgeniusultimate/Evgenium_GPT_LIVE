@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .browser import find_system_browser
 from .config import app_home, config_path, load_config
+from .integration import integration_summary
 
 
 def _line(kind: str, text: str) -> None:
@@ -15,7 +16,7 @@ def _line(kind: str, text: str) -> None:
 
 
 def run_doctor() -> int:
-    """Check the pieces EGL needs without requiring a configured ChatGPT chat."""
+    """Check the pieces EGL needs without requiring a live ChatGPT session."""
     failures = 0
 
     print("\nEGL doctor")
@@ -69,10 +70,31 @@ def run_doctor() -> int:
             )
             state = proc.stdout.strip() or f"exit {proc.returncode}"
             _line("OK" if proc.returncode == 0 else "WARN", f"systemd --user: {state}")
+
+            enabled = subprocess.run(
+                ["systemctl", "--user", "is-enabled", "egl.service"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            enabled_text = enabled.stdout.strip() or "not installed"
+            _line("OK" if enabled.returncode == 0 else "WARN", f"Autostart egl.service: {enabled_text}")
         except Exception as exc:
             _line("WARN", f"systemd --user check failed: {exc}")
     else:
         _line("WARN", "systemctl not found; autostart service cannot be installed")
+
+    integration = integration_summary()
+    if integration["desktop_entry"]:
+        _line("OK", "EGL settings application entry installed")
+    else:
+        _line("WARN", "EGL settings application entry is not installed")
+    if integration["plasma"]:
+        if integration["kwin_script"]:
+            _line("OK", "KWin EGL Window Guard installed")
+        else:
+            _line("WARN", "Plasma detected but EGL Window Guard is not installed")
 
     if config_path().exists():
         try:
@@ -87,6 +109,8 @@ def run_doctor() -> int:
                 _line("OK", f"Vosk model: {model}")
             else:
                 _line("WARN", "Vosk model is not downloaded yet; setup will download it")
+            _line("INFO", f"Background browser: {cfg.browser_headless}")
+            _line("INFO", f"Keep browser alive after Voice: {cfg.browser_keep_alive}")
         except Exception as exc:
             failures += 1
             _line("FAIL", f"Config could not be read: {exc}")
