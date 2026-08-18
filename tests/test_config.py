@@ -7,25 +7,36 @@ from pathlib import Path
 class ConfigTests(unittest.TestCase):
     def test_default_paths_and_roundtrip(self):
         with tempfile.TemporaryDirectory() as td:
-            old = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR")}
+            old_home = os.environ.get("EGL_HOME")
+            old_runtime = os.environ.get("XDG_RUNTIME_DIR")
             try:
-                os.environ["XDG_CONFIG_HOME"] = str(Path(td) / "config")
-                os.environ["XDG_DATA_HOME"] = str(Path(td) / "data")
-                os.environ["XDG_STATE_HOME"] = str(Path(td) / "state")
+                egl_home = Path(td) / "Evgenium_GPT"
+                os.environ["EGL_HOME"] = str(egl_home)
                 os.environ["XDG_RUNTIME_DIR"] = str(Path(td) / "run")
+
                 import egl.config as c
+
                 cfg = c.EGLConfig.default()
+                self.assertEqual(Path(cfg.browser_profile_path), egl_home / "data" / "browser-profile")
+                self.assertTrue(Path(cfg.vosk_model_path).is_relative_to(egl_home))
+
                 cfg.chat_url = "https://chatgpt.com/c/test"
-                c.save_config(cfg)
+                path = c.save_config(cfg)
+                self.assertEqual(path, egl_home / "config" / "config.json")
+
                 loaded = c.load_config()
                 self.assertEqual(loaded.chat_url, cfg.chat_url)
                 self.assertEqual(loaded.wake_phrase, "евгениум слушай")
             finally:
-                for key, value in old.items():
-                    if value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = value
+                if old_home is None:
+                    os.environ.pop("EGL_HOME", None)
+                else:
+                    os.environ["EGL_HOME"] = old_home
+
+                if old_runtime is None:
+                    os.environ.pop("XDG_RUNTIME_DIR", None)
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = old_runtime
 
 
 if __name__ == "__main__":
