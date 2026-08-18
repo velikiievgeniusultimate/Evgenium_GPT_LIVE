@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 import math
 import subprocess
 import sys
+import time
 from array import array
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -19,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -26,17 +31,152 @@ from PySide6.QtWidgets import (
 from .config import load_config, save_config
 from .control import send_command
 from .integration import install_integrations
-from .state import read_state
+from .state import debug_screenshot_path, read_debug_events, read_state
+
+
+class DebugWindow(QDialog):
+    """Live view of the otherwise invisible EGL browser and event pipeline."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("EGL — отладка Voice")
+        self.resize(920, 820)
+        self._last_snapshot_request = 0.0
+
+        layout = QVBoxLayout(self)
+
+        self.state_label = QLabel()
+        self.hotword_label = QLabel("Vosk: —")
+        self.stop_label = QLabel("STOP: —")
+        self.hotword_label.setWordWrap(True)
+        self.stop_label.setWordWrap(True)
+        layout.addWidget(self.state_label)
+        layout.addWidget(self.hotword_label)
+        layout.addWidget(self.stop_label)
+
+        controls = QHBoxLayout()
+        wake = QPushButton("Wake")
+        wake.clicked.connect(lambda: self._command("wake"))
+        stop = QPushButton("STOP")
+        stop.clicked.connect(lambda: self._command("stop"))
+        snapshot = QPushButton("Снимок сейчас")
+        snapshot.clicked.connect(self._request_snapshot)
+        reload_page = QPushButton("Reload ChatGPT")
+        reload_page.clicked.connect(lambda: self._command("browser_reload"))
+        self.live_preview = QCheckBox("Живое превью")
+        self.live_preview.setChecked(True)
+        for widget in (wake, stop, snapshot, reload_page, self.live_preview):
+            controls.addWidget(widget)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        preview_group = QGroupBox("Скрытая вкладка ChatGPT (Xvfb)")
+        preview_layout = QVBoxLayout(preview_group)
+        self.preview = QLabel("Жду первый снимок…")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumSize(640, 360)
+        self.preview.setStyleSheet("QLabel { background: #111; color: #aaa; border: 1px solid #444; }")
+        preview_layout.addWidget(self.preview)
+        layout.addWidget(preview_group, 2)
+
+        log_group = QGroupBox("События EGL")
+        log_layout = QVBoxLayout(log_group)
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        log_layout.addWidget(self.log)
+        layout.addWidget(log_group, 1)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._refresh)
+        self.timer.start(700)
+        self._request_snapshot()
+        self._refresh()
+
+    def _command(self, command: str) -> None:
+        try:
+            send_command(command)
+        except OSError as exc:
+            QMessageBox.warning(self, "EGL debug", f"Daemon не отвечает:\n{exc}")
+
+    def _request_snapshot(self) -> None:
+        self._last_snapshot_request = time.monotonic()
+        self._command("debug_snapshot")
+
+    @staticmethod
+    def _format_event(item: dict) -> str:
+        ts = item.get("ts", 0)
+        try:
+            stamp = time.strftime("%H:%M:%S", time.localtime(float(ts)))
+        except Exception:
+            stamp = "??:??:??"
+        event = str(item.get("event", "?"))
+        detail = str(item.get("detail", ""))
+        extra = {k: v for k, v in item.items() if k not in {"ts", "event", "detail"}}
+        suffix = f"  {json.dumps(extra, ensure_ascii=False)}" if extra else ""
+        return f"[{stamp}] {event}: {detail}{suffix}"
+
+    def _refresh(self) -> None:
+        state = read_state()
+        self.state_label.setText(
+            f"Состояние: <b>{state.mode}</b> — {state.detail or 'без деталей'}"
+        )
+
+        events = read_debug_events(140)
+        hotwords = [e for e in events if e.get("event") == "hotword_heard"]
+        if hotwords:
+            last = hotwords[-1]
+            self.hotword_label.setText(
+                "Vosk услышал: <b>{}</b> | voice_active={} | wake_match={} | stop_match={}".format(
+                    last.get("detail", ""),
+                    last.get("voice_active"),
+                    last.get("wake_match"),
+                    last.get("stop_match"),
+                )
+            )
+
+        stops = [e for e in events if e.get("event") == "voice_stopped"]
+        if stops:
+            last = stops[-1]
+            verified = last.get("verified")
+            ui_after = last.get("ui_active_after")
+            self.stop_label.setText(
+                f"Последний STOP: <b>verified={verified}</b> | Voice UI после остановки: <b>{ui_after}</b>"
+            )
+
+        text = "\n".join(self._format_event(e) for e in events)
+        if self.log.toPlainText() != text:
+            scroll = self.log.verticalScrollBar()
+            at_bottom = scroll.value() >= max(0, scroll.maximum() - 5)
+            self.log.setPlainText(text)
+            if at_bottom:
+                scroll.setValue(scroll.maximum())
+
+        path = debug_screenshot_path()
+        if path.exists():
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                self.preview.setPixmap(
+                    pixmap.scaled(
+                        self.preview.size(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+
+        if self.live_preview.isChecked() and time.monotonic() - self._last_snapshot_request >= 1.2:
+            self._request_snapshot()
 
 
 class SettingsWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Evgenium GPT LIVE — EGL")
-        self.resize(700, 570)
+        self.resize(700, 600)
         self.cfg = load_config()
         self._mic_stream = None
         self._mic_level = 0.0
+        self._debug_window: DebugWindow | None = None
 
         root = QWidget(self)
         layout = QVBoxLayout(root)
@@ -65,7 +205,9 @@ class SettingsWindow(QMainWindow):
         stop.clicked.connect(lambda: self._command("stop"))
         reload_browser = QPushButton("Перезагрузить скрытую вкладку")
         reload_browser.clicked.connect(lambda: self._command("browser_reload"))
-        for button in (wake, stop, reload_browser):
+        debug = QPushButton("Открыть отладчик")
+        debug.clicked.connect(self._open_debug)
+        for button in (wake, stop, reload_browser, debug):
             controls.addWidget(button)
         status_layout.addLayout(controls)
         layout.addWidget(status_group)
@@ -125,6 +267,13 @@ class SettingsWindow(QMainWindow):
         self._meter_timer.timeout.connect(self._refresh_meter)
         self._meter_timer.start(60)
         self._refresh_status()
+
+    def _open_debug(self) -> None:
+        if self._debug_window is None:
+            self._debug_window = DebugWindow(self)
+        self._debug_window.show()
+        self._debug_window.raise_()
+        self._debug_window.activateWindow()
 
     def _load_microphones(self) -> None:
         self.microphone.clear()
@@ -233,7 +382,6 @@ class SettingsWindow(QMainWindow):
     def _save(self) -> None:
         self._stop_mic_test()
         self.cfg.microphone_device = self._selected_device()
-        # EGL 0.5 enforces these invariants regardless of old 0.4 settings.
         self.cfg.browser_headless = True
         self.cfg.browser_keep_alive = True
         self.cfg.indicator_enabled = self.indicator_enabled.isChecked()
