@@ -50,16 +50,15 @@ PY
 say "Installing compatible Playwright Chromium"
 "$VENV/bin/python" -m playwright install chromium
 
+# `sync_playwright()` on Python 3.14 can emit noisy asyncio teardown warnings
+# even when merely reading chromium.executable_path. The Playwright CLI has an
+# official installed-browser listing, so use that for the installation check.
 say "Checking Playwright browser"
-"$VENV/bin/python" - <<'PY'
-from pathlib import Path
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    path = Path(p.chromium.executable_path)
-    if not path.exists():
-        raise SystemExit(f"Playwright Chromium executable is missing: {path}")
-    print(f"  OK Chromium: {path}")
-PY
+BROWSER_LIST="$($VENV/bin/python -m playwright install --list)"
+printf '%s\n' "$BROWSER_LIST"
+if ! grep -qi 'chromium' <<<"$BROWSER_LIST"; then
+  die "Playwright did not report an installed Chromium browser."
+fi
 
 ln -sfn "$VENV/bin/egl" "$BIN_DIR/egl"
 
@@ -89,5 +88,12 @@ then
   exit 0
 fi
 
+# A `curl ... | bash` bootstrap consumes stdin. First-time setup is interactive,
+# so reconnect it explicitly to the user's controlling terminal instead of
+# inheriting EOF from the curl pipe.
 echo
-exec "$VENV/bin/egl" setup
+if [[ -r /dev/tty ]]; then
+  exec "$VENV/bin/egl" setup </dev/tty
+fi
+
+die "First-time EGL setup needs an interactive terminal. Run: $VENV/bin/egl setup"
