@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -40,7 +41,7 @@ class DebugWindow(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("EGL — отладка Voice")
-        self.resize(920, 820)
+        self.resize(960, 850)
         self._last_snapshot_request = 0.0
 
         layout = QVBoxLayout(self)
@@ -48,6 +49,7 @@ class DebugWindow(QDialog):
         self.state_label = QLabel()
         self.hotword_label = QLabel("Vosk: —")
         self.stop_label = QLabel("STOP: —")
+        self.stop_label.setStyleSheet("font-weight: 700; font-size: 14px;")
         self.hotword_label.setWordWrap(True)
         self.stop_label.setWordWrap(True)
         layout.addWidget(self.state_label)
@@ -89,7 +91,7 @@ class DebugWindow(QDialog):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
-        self.timer.start(700)
+        self.timer.start(600)
         self._request_snapshot(quiet=True)
         self._refresh()
 
@@ -122,27 +124,55 @@ class DebugWindow(QDialog):
             f"Состояние: <b>{state.mode}</b> — {state.detail or 'без деталей'}"
         )
 
-        events = read_debug_events(140)
+        events = read_debug_events(180)
         hotwords = [e for e in events if e.get("event") == "hotword_heard"]
         if hotwords:
             last = hotwords[-1]
+            conf = last.get("confidence")
+            conf_text = "—" if conf is None else f"{float(conf) * 100:.1f}%"
+            accepted = last.get("accepted") or "нет"
             self.hotword_label.setText(
-                "Vosk услышал: <b>{}</b> | voice_active={} | wake_match={} | stop_match={}".format(
+                "Vosk: <b>{}</b> | conf=<b>{}</b> | final={} | wake_match={} | "
+                "stop_match={} | accepted=<b>{}</b> | {}".format(
                     last.get("detail", ""),
-                    last.get("voice_active"),
+                    conf_text,
+                    last.get("final"),
                     last.get("wake_match"),
                     last.get("stop_match"),
+                    accepted,
+                    last.get("reason", ""),
                 )
             )
 
-        stops = [e for e in events if e.get("event") == "voice_stopped"]
-        if stops:
-            last = stops[-1]
-            verified = last.get("verified")
-            ui_after = last.get("ui_active_after")
-            self.stop_label.setText(
-                f"Последний STOP: <b>verified={verified}</b> | Voice UI после остановки: <b>{ui_after}</b>"
-            )
+        stop_events = [
+            e
+            for e in events
+            if e.get("event") in {"STOP_DETECTED", "STOP_SENT", "STOP_CONFIRMED", "STOP_FAILED"}
+        ]
+        if stop_events:
+            # Show the latest complete pipeline rather than a vague boolean.
+            latest = stop_events[-1]
+            event = str(latest.get("event"))
+            if event == "STOP_CONFIRMED":
+                self.stop_label.setText(
+                    "STOP: ✅ DETECTED → SENT → CONFIRMED | method={} | {} ms | UI after={}".format(
+                        latest.get("stop_method", "?"),
+                        latest.get("total_stop_ms", "?"),
+                        latest.get("ui_active_after", "?"),
+                    )
+                )
+            elif event == "STOP_FAILED":
+                self.stop_label.setText(
+                    "STOP: ❌ DETECTED → SENT → FAILED | method={} | {} ms | UI after={}".format(
+                        latest.get("stop_method", "?"),
+                        latest.get("total_stop_ms", "?"),
+                        latest.get("ui_active_after", "?"),
+                    )
+                )
+            elif event == "STOP_SENT":
+                self.stop_label.setText("STOP: ⚡ DETECTED → SENT → killing Voice…")
+            else:
+                self.stop_label.setText("STOP: ⚡ DETECTED → waiting for daemon…")
 
         text = "\n".join(self._format_event(e) for e in events)
         if self.log.toPlainText() != text:
@@ -172,7 +202,7 @@ class SettingsWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Evgenium GPT LIVE — EGL")
-        self.resize(700, 600)
+        self.resize(740, 720)
         self.cfg = load_config()
         self._mic_stream = None
         self._mic_level = 0.0
@@ -201,7 +231,7 @@ class SettingsWindow(QMainWindow):
         controls = QHBoxLayout()
         wake = QPushButton("Запустить Voice")
         wake.clicked.connect(lambda: self._command("wake"))
-        stop = QPushButton("Стоп")
+        stop = QPushButton("СТОП")
         stop.clicked.connect(lambda: self._command("stop"))
         reload_browser = QPushButton("Перезагрузить скрытую вкладку")
         reload_browser.clicked.connect(lambda: self._command("browser_reload"))
@@ -229,6 +259,30 @@ class SettingsWindow(QMainWindow):
         test_row.addWidget(self.level, 1)
         audio_layout.addLayout(test_row)
         layout.addWidget(audio_group)
+
+        recognition_group = QGroupBox("Распознавание команд")
+        recognition_form = QFormLayout(recognition_group)
+        self.wake_phrase = QLineEdit(self.cfg.wake_phrase)
+        self.stop_phrase = QLineEdit(self.cfg.stop_phrase)
+        self.wake_threshold = QSpinBox()
+        self.wake_threshold.setRange(50, 99)
+        self.wake_threshold.setSuffix(" %")
+        self.wake_threshold.setValue(round(self.cfg.wake_confidence_threshold * 100))
+        self.stop_threshold = QSpinBox()
+        self.stop_threshold.setRange(0, 95)
+        self.stop_threshold.setSuffix(" %")
+        self.stop_threshold.setValue(round(self.cfg.stop_confidence_threshold * 100))
+        recognition_form.addRow("Wake-фраза:", self.wake_phrase)
+        recognition_form.addRow("STOP-фраза:", self.stop_phrase)
+        recognition_form.addRow("Строгость Wake:", self.wake_threshold)
+        recognition_form.addRow("Строгость STOP:", self.stop_threshold)
+        hint = QLabel(
+            "Wake принимается только по финальному точному результату Vosk. "
+            "STOP во время Voice может сработать уже на partial — это намеренно."
+        )
+        hint.setWordWrap(True)
+        recognition_form.addRow(hint)
+        layout.addWidget(recognition_group)
 
         behavior_group = QGroupBox("Поведение")
         behavior_form = QFormLayout(behavior_group)
@@ -381,7 +435,18 @@ class SettingsWindow(QMainWindow):
 
     def _save(self) -> None:
         self._stop_mic_test()
+        wake_phrase = self.wake_phrase.text().strip().lower()
+        stop_phrase = self.stop_phrase.text().strip().lower()
+        if not wake_phrase or not stop_phrase:
+            QMessageBox.warning(self, "EGL", "Wake- и STOP-фразы не могут быть пустыми.")
+            return
         self.cfg.microphone_device = self._selected_device()
+        self.cfg.wake_phrase = wake_phrase
+        self.cfg.stop_phrase = stop_phrase
+        self.cfg.wake_aliases = [wake_phrase]
+        self.cfg.stop_aliases = [stop_phrase]
+        self.cfg.wake_confidence_threshold = self.wake_threshold.value() / 100.0
+        self.cfg.stop_confidence_threshold = self.stop_threshold.value() / 100.0
         self.cfg.browser_headless = True
         self.cfg.browser_keep_alive = True
         self.cfg.indicator_enabled = self.indicator_enabled.isChecked()
