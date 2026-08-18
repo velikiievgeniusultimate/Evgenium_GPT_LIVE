@@ -15,7 +15,7 @@ from .config import load_config
 from .control import ControlServer
 from .hotword import HotwordListener
 from .indicator_client import IndicatorClient
-from .state import write_state
+from .state import append_debug_event, debug_screenshot_path, write_state
 
 LOG = logging.getLogger(__name__)
 
@@ -49,6 +49,16 @@ def run_daemon() -> int:
 
     indicator = IndicatorClient(cfg.indicator_enabled, cfg.indicator_size, cfg.indicator_margin)
     meter = OutputAudioMeter()
+
+    def hotword_debug(text: str, active: bool, wake_match: bool, stop_match: bool) -> None:
+        append_debug_event(
+            "hotword_heard",
+            text,
+            voice_active=active,
+            wake_match=wake_match,
+            stop_match=stop_match,
+        )
+
     listener = HotwordListener(
         model_path=Path(cfg.vosk_model_path),
         wake_aliases=cfg.wake_aliases,
@@ -56,6 +66,7 @@ def run_daemon() -> int:
         on_wake=lambda: enqueue("wake"),
         on_stop=lambda: enqueue("stop"),
         microphone_device=cfg.microphone_device,
+        on_debug=hotword_debug,
     )
     control = ControlServer(enqueue)
 
@@ -66,6 +77,16 @@ def run_daemon() -> int:
     page_refresh_backoff = 10.0
     next_browser_restart = 0.0
     next_page_refresh = 0.0
+
+    def snapshot(reason: str) -> None:
+        if browser is None or not browser.is_running():
+            append_debug_event("snapshot_skipped", reason, browser_running=False)
+            return
+        try:
+            path = browser.capture_screenshot(debug_screenshot_path())
+            append_debug_event("snapshot", reason, path=str(path))
+        except Exception as exc:
+            append_debug_event("snapshot_failed", reason, error=str(exc))
 
     def idle_state() -> None:
         if browser_ready:
@@ -86,11 +107,6 @@ def run_daemon() -> int:
         browser_ready = False
 
     def start_permanent_browser() -> bool:
-        """Start one invisible, long-lived Chromium instance.
-
-        Network/VPN failure is not a browser failure. open_runtime() deliberately
-        keeps Chromium/Xvfb/CDP alive even when ChatGPT itself is not reachable.
-        """
         nonlocal browser, browser_ready, browser_restart_backoff, page_refresh_backoff
         close_browser()
         browser = ChatGPTBrowser(
@@ -102,22 +118,21 @@ def run_daemon() -> int:
         browser_ready = browser.open_runtime()
         browser_restart_backoff = 10.0
         page_refresh_backoff = 10.0
+        append_debug_event("browser_started", "permanent hidden Chromium", ready=browser_ready)
         LOG.info("Permanent hidden Chromium started; ChatGPT ready=%s", browser_ready)
         return browser_ready
 
-    # Local controls/hotword must become available even if the network is down.
     listener.start()
     control.start()
     meter.start()
+    append_debug_event("daemon_started", "EGL daemon started", microphone=cfg.microphone_device)
 
-    # Unlike EGL 0.4, runtime Chromium is intentionally started immediately and
-    # then kept alive for the whole daemon lifetime. Its window lives on Xvfb,
-    # so Plasma never sees it.
     write_state("starting_browser", "starting permanent hidden ChatGPT tab")
     try:
         start_permanent_browser()
     except Exception as exc:
         LOG.error("Initial hidden browser startup failed: %s", exc, exc_info=True)
+        append_debug_event("browser_start_failed", str(exc))
         close_browser()
         next_browser_restart = time.monotonic() + browser_restart_backoff
         browser_restart_backoff = min(browser_restart_backoff * 1.8, 60.0)
@@ -133,8 +148,6 @@ def run_daemon() -> int:
 
             now = time.monotonic()
 
-            # Browser process resilience: a genuine Chromium/Xvfb crash gets a
-            # bounded restart loop. Missing VPN does NOT restart the process.
             if not voice_active and (browser is None or not browser.is_running()):
                 if now >= next_browser_restart:
                     try:
@@ -143,14 +156,12 @@ def run_daemon() -> int:
                         idle_state()
                     except Exception as exc:
                         LOG.error("Hidden browser recovery failed: %s", exc, exc_info=True)
+                        append_debug_event("browser_recovery_failed", str(exc))
                         close_browser()
                         next_browser_restart = now + browser_restart_backoff
                         browser_restart_backoff = min(browser_restart_backoff * 1.8, 60.0)
                         idle_state()
 
-            # Page readiness resilience: keep the same browser/tab alive and
-            # gently refresh it until ChatGPT/Voice becomes available. This is
-            # what recovers automatically when VPN is enabled after login.
             if (
                 not voice_active
                 and browser is not None
@@ -164,6 +175,7 @@ def run_daemon() -> int:
                     LOG.debug("Background ChatGPT readiness check failed: %s", exc, exc_info=True)
                     browser_ready = False
                 if browser_ready:
+                    append_debug_event("chat_ready", "hidden ChatGPT tab became ready")
                     LOG.info("Hidden ChatGPT tab is ready")
                     page_refresh_backoff = 10.0
                     idle_state()
@@ -171,17 +183,24 @@ def run_daemon() -> int:
                     next_page_refresh = now + page_refresh_backoff
                     page_refresh_backoff = min(page_refresh_backoff * 1.5, 60.0)
 
+            if command:
+                append_debug_event(
+                    "command_received",
+                    command,
+                    voice_active=voice_active,
+                    browser_ready=browser_ready,
+                )
+
             if command in {"wake", "start"} and not voice_active:
                 write_state("starting_voice", "using preloaded ChatGPT tab")
                 indicator.show("starting")
+                append_debug_event("voice_start_begin", "wake/start command accepted")
                 try:
                     if browser is None or not browser.is_running():
                         start_permanent_browser()
 
                     assert browser is not None
                     if not browser_ready:
-                        # Explicit wake gets one immediate, generous readiness
-                        # attempt. The browser process/tab itself is not replaced.
                         browser_ready = browser.reload_chat(timeout_ms=20_000)
                     if not browser_ready:
                         raise RuntimeError(
@@ -193,14 +212,22 @@ def run_daemon() -> int:
                     listener.set_voice_active(True)
                     indicator.send(mode="listening")
                     write_state("listening", f'waiting for "{cfg.stop_phrase}"')
+                    append_debug_event(
+                        "voice_started",
+                        "Voice start click completed",
+                        exit_button_visible=browser.is_voice_active_ui(),
+                    )
+                    snapshot("after_voice_start")
                     LOG.info("ChatGPT Voice started from preloaded tab")
                 except Exception as exc:
                     LOG.error("Could not start ChatGPT Voice: %s", exc, exc_info=True)
+                    append_debug_event("voice_start_failed", str(exc))
                     voice_active = False
                     listener.set_voice_active(False)
                     browser_ready = bool(browser and browser.is_running() and browser.has_voice_button())
                     indicator.send(mode="error")
                     write_state("error", str(exc))
+                    snapshot("voice_start_failed")
                     _notify(
                         "EGL: ChatGPT пока не готов",
                         "Скрытая вкладка остаётся запущенной. Проверь VPN/сеть; EGL сам продолжит готовить её в фоне.",
@@ -210,23 +237,48 @@ def run_daemon() -> int:
                     next_page_refresh = time.monotonic() + 3.0
                     idle_state()
 
-            elif command in {"stop", "end"} and voice_active:
-                write_state("stopping_voice", "closing Voice; keeping ChatGPT tab alive")
+            elif command in {"stop", "end"}:
+                # Process stop even when our internal flag is already false. This
+                # makes GUI/manual stop a real emergency stop and helps diagnose
+                # state desynchronization with the actual ChatGPT Voice UI.
+                write_state("stopping_voice", "closing and verifying Voice UI")
+                append_debug_event(
+                    "voice_stop_begin",
+                    "stop/end command accepted",
+                    internal_voice_active=voice_active,
+                    ui_active_before=bool(browser and browser.is_voice_active_ui()),
+                )
                 listener.set_voice_active(False)
+                verified = True
                 try:
                     if browser is not None:
-                        browser.stop_voice()
-                except Exception:
+                        verified = browser.stop_voice()
+                except Exception as exc:
+                    verified = False
                     LOG.exception("Voice stop fallback failed")
+                    append_debug_event("voice_stop_exception", str(exc))
                 voice_active = False
                 indicator.hide()
-                # The core invariant of EGL 0.5: never close the runtime browser
-                # after a conversation. Keep the same loaded tab warm.
-                browser_ready = bool(browser and browser.is_running() and browser.ensure_chat_ready(timeout_ms=5_000))
+                browser_ready = bool(
+                    browser
+                    and browser.is_running()
+                    and browser.ensure_chat_ready(timeout_ms=5_000)
+                )
+                append_debug_event(
+                    "voice_stopped",
+                    "Voice stop verification finished",
+                    verified=verified,
+                    ui_active_after=bool(browser and browser.is_voice_active_ui()),
+                    browser_ready=browser_ready,
+                )
+                snapshot("after_voice_stop")
                 if not browser_ready:
                     next_page_refresh = time.monotonic() + 2.0
                 idle_state()
-                LOG.info("ChatGPT Voice stopped; permanent tab kept alive")
+                LOG.info("ChatGPT Voice stop finished; verified=%s", verified)
+
+            elif command in {"debug_snapshot", "browser_snapshot"}:
+                snapshot("manual_debug_snapshot")
 
             elif command == "browser_reload":
                 try:
@@ -234,16 +286,17 @@ def run_daemon() -> int:
                         start_permanent_browser()
                     assert browser is not None
                     browser_ready = browser.reload_chat(timeout_ms=20_000)
+                    append_debug_event("browser_reload", "manual reload", ready=browser_ready)
+                    snapshot("after_browser_reload")
                     idle_state()
                 except Exception as exc:
                     LOG.error("Could not reload hidden ChatGPT tab: %s", exc, exc_info=True)
+                    append_debug_event("browser_reload_failed", str(exc))
                     browser_ready = False
                     next_page_refresh = time.monotonic() + 5.0
                     idle_state()
 
             elif command in {"browser_show", "browser_hide"}:
-                # Compatibility with EGL 0.4 commands. Runtime now lives on a
-                # private X display and intentionally cannot be exposed to Plasma.
                 _notify(
                     "EGL",
                     "Служебный Chromium работает на приватном виртуальном дисплее и всегда невидим.",
@@ -256,6 +309,7 @@ def run_daemon() -> int:
                 indicator.send(level=meter.level, mode="listening")
 
     finally:
+        append_debug_event("daemon_stopping", "EGL daemon stopping")
         write_state("stopping")
         listener.set_voice_active(False)
         control.close()
