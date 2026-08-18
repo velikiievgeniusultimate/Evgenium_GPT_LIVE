@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -5,7 +6,7 @@ from pathlib import Path
 
 
 class ConfigTests(unittest.TestCase):
-    def test_default_paths_and_roundtrip(self):
+    def test_default_paths_roundtrip_and_browser_policy_migration(self):
         with tempfile.TemporaryDirectory() as td:
             old_home = os.environ.get("EGL_HOME")
             old_runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -31,7 +32,19 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(loaded.chat_url, cfg.chat_url)
                 self.assertEqual(loaded.wake_phrase, "евгениум слушай")
                 self.assertEqual(loaded.microphone_device, 7)
+                self.assertTrue(loaded.browser_headless)
                 self.assertTrue(loaded.browser_keep_alive)
+
+                # Simulate a 0.4 config that explicitly asked EGL to close/show
+                # the browser. 0.5 must migrate it to the fixed permanent-hidden
+                # runtime contract.
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw["browser_headless"] = False
+                raw["browser_keep_alive"] = False
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                migrated = c.load_config()
+                self.assertTrue(migrated.browser_headless)
+                self.assertTrue(migrated.browser_keep_alive)
             finally:
                 if old_home is None:
                     os.environ.pop("EGL_HOME", None)
