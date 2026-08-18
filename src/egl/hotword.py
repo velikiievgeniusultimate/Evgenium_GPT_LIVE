@@ -24,6 +24,7 @@ class HotwordListener:
         on_wake: Callable[[], None],
         on_stop: Callable[[], None],
         microphone_device: int | None = None,
+        on_debug: Callable[[str, bool, bool, bool], None] | None = None,
     ) -> None:
         self.model_path = model_path
         self.wake_aliases = wake_aliases
@@ -31,10 +32,12 @@ class HotwordListener:
         self.on_wake = on_wake
         self.on_stop = on_stop
         self.microphone_device = microphone_device
+        self.on_debug = on_debug
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._active = threading.Event()
         self._last_trigger = 0.0
+        self._last_debug_text = ""
 
     def set_voice_active(self, active: bool) -> None:
         if active:
@@ -54,14 +57,25 @@ class HotwordListener:
             self._thread.join(timeout=2)
 
     def _dispatch(self, text: str) -> None:
+        active = self._active.is_set()
+        wake_match = phrase_matches(text, self.wake_aliases)
+        stop_match = phrase_matches(text, self.stop_aliases)
+
+        if self.on_debug is not None and text != self._last_debug_text:
+            self._last_debug_text = text
+            try:
+                self.on_debug(text, active, wake_match, stop_match)
+            except Exception:
+                LOG.debug("Hotword debug callback failed", exc_info=True)
+
         now = time.monotonic()
         if now - self._last_trigger < 1.8:
             return
-        if self._active.is_set():
-            if phrase_matches(text, self.stop_aliases):
+        if active:
+            if stop_match:
                 self._last_trigger = now
                 self.on_stop()
-        elif phrase_matches(text, self.wake_aliases):
+        elif wake_match:
             self._last_trigger = now
             self.on_wake()
 
