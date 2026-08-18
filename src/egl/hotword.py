@@ -36,7 +36,10 @@ class HotwordListener:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._active = threading.Event()
-        self._last_trigger = 0.0
+        # Wake and stop need independent debounce clocks. A stop spoken soon
+        # after wake must never be suppressed by the wake trigger itself.
+        self._last_wake_trigger = 0.0
+        self._last_stop_trigger = 0.0
         self._last_debug_text = ""
 
     def set_voice_active(self, active: bool) -> None:
@@ -69,14 +72,12 @@ class HotwordListener:
                 LOG.debug("Hotword debug callback failed", exc_info=True)
 
         now = time.monotonic()
-        if now - self._last_trigger < 1.8:
-            return
         if active:
-            if stop_match:
-                self._last_trigger = now
+            if stop_match and now - self._last_stop_trigger >= 1.2:
+                self._last_stop_trigger = now
                 self.on_stop()
-        elif wake_match:
-            self._last_trigger = now
+        elif wake_match and now - self._last_wake_trigger >= 1.5:
+            self._last_wake_trigger = now
             self.on_wake()
 
     def _run(self) -> None:
