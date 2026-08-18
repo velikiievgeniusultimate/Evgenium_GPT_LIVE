@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 import sys
@@ -33,19 +34,29 @@ def run_doctor() -> int:
             failures += 1
             _line("FAIL", f"Python module {module}: {exc}")
 
+    # Do not start Playwright's driver just to inspect executable_path. On some
+    # Python 3.14 builds that produces harmless but alarming asyncio teardown
+    # warnings. The official CLI can list installed browsers without opening one.
     try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            executable = Path(p.chromium.executable_path)
-            if executable.exists():
-                _line("OK", f"Playwright Chromium: {executable}")
-            else:
-                failures += 1
-                _line("FAIL", f"Playwright Chromium missing: {executable}")
+        proc = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            env=os.environ.copy(),
+        )
+        listing = proc.stdout.strip()
+        if proc.returncode == 0 and "chromium" in listing.lower():
+            first = next((line.strip() for line in listing.splitlines() if "chromium" in line.lower()), "Chromium installed")
+            _line("OK", f"Playwright {first}")
+        else:
+            failures += 1
+            detail = (proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}"
+            _line("FAIL", f"Playwright Chromium not listed: {detail}")
     except Exception as exc:
         failures += 1
-        _line("FAIL", f"Playwright runtime: {exc}")
+        _line("FAIL", f"Playwright browser check: {exc}")
 
     try:
         import sounddevice as sd
