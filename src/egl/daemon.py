@@ -78,13 +78,15 @@ def run_daemon() -> int:
     next_browser_restart = 0.0
     next_page_refresh = 0.0
 
-    def snapshot(reason: str) -> None:
+    def snapshot(reason: str, *, log_success: bool = True) -> None:
         if browser is None or not browser.is_running():
-            append_debug_event("snapshot_skipped", reason, browser_running=False)
+            if log_success:
+                append_debug_event("snapshot_skipped", reason, browser_running=False)
             return
         try:
             path = browser.capture_screenshot(debug_screenshot_path())
-            append_debug_event("snapshot", reason, path=str(path))
+            if log_success:
+                append_debug_event("snapshot", reason, path=str(path))
         except Exception as exc:
             append_debug_event("snapshot_failed", reason, error=str(exc))
 
@@ -183,7 +185,7 @@ def run_daemon() -> int:
                     next_page_refresh = now + page_refresh_backoff
                     page_refresh_backoff = min(page_refresh_backoff * 1.5, 60.0)
 
-            if command:
+            if command and command != "debug_snapshot_quiet":
                 append_debug_event(
                     "command_received",
                     command,
@@ -238,9 +240,6 @@ def run_daemon() -> int:
                     idle_state()
 
             elif command in {"stop", "end"}:
-                # Process stop even when our internal flag is already false. This
-                # makes GUI/manual stop a real emergency stop and helps diagnose
-                # state desynchronization with the actual ChatGPT Voice UI.
                 write_state("stopping_voice", "closing and verifying Voice UI")
                 append_debug_event(
                     "voice_stop_begin",
@@ -279,6 +278,9 @@ def run_daemon() -> int:
 
             elif command in {"debug_snapshot", "browser_snapshot"}:
                 snapshot("manual_debug_snapshot")
+
+            elif command == "debug_snapshot_quiet":
+                snapshot("live_debug_preview", log_success=False)
 
             elif command == "browser_reload":
                 try:
