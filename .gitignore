@@ -8,3 +8,8 @@ venv/
 htmlcov/
 .DS_Store
 *.log
+
+# EGL keeps local runtime data beside the checkout in ~/Evgenium_GPT.
+config/
+data/
+state/
