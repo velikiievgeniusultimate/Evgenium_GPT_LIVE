@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evgenium-gpt-live"
-version = "0.4.0"
-description = "Linux voice launcher for ChatGPT Web: wake phrase, stop phrase, persistent chat, Plasma integration and settings GUI."
+version = "0.5.0"
+description = "Linux voice launcher for ChatGPT Web with permanent hidden tab, wake/stop phrases, Plasma integration and settings GUI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
