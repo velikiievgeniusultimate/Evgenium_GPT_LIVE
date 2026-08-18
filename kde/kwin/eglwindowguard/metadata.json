@@ -1,0 +1,18 @@
+{
+  "KPlugin": {
+    "Name": "EGL Window Guard",
+    "Description": "Keeps the Evgenium GPT LIVE service Chromium out of Plasma task surfaces.",
+    "Icon": "preferences-system-windows",
+    "Authors": [
+      {
+        "Name": "Evgenium GPT LIVE contributors"
+      }
+    ],
+    "Id": "eglwindowguard",
+    "Version": "1.0",
+    "License": "MIT"
+  },
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js",
+  "KPackageStructure": "KWin/Script"
+}
