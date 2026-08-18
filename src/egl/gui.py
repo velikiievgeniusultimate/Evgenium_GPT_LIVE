@@ -33,7 +33,7 @@ class SettingsWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Evgenium GPT LIVE — EGL")
-        self.resize(680, 560)
+        self.resize(700, 570)
         self.cfg = load_config()
         self._mic_stream = None
         self._mic_level = 0.0
@@ -43,26 +43,29 @@ class SettingsWindow(QMainWindow):
         self.setCentralWidget(root)
 
         title = QLabel("<h2>Evgenium GPT LIVE</h2>")
-        title.setTextFormat(title.textFormat())
         layout.addWidget(title)
 
         status_group = QGroupBox("Состояние")
         status_layout = QVBoxLayout(status_group)
         self.service_label = QLabel()
         self.state_label = QLabel()
+        self.browser_policy = QLabel(
+            "Служебный Chromium: <b>всегда запущен</b> на приватном виртуальном дисплее Xvfb. "
+            "Plasma его не видит; вкладка ChatGPT прогревается в фоне."
+        )
+        self.browser_policy.setWordWrap(True)
         status_layout.addWidget(self.service_label)
         status_layout.addWidget(self.state_label)
+        status_layout.addWidget(self.browser_policy)
 
         controls = QHBoxLayout()
         wake = QPushButton("Запустить Voice")
         wake.clicked.connect(lambda: self._command("wake"))
         stop = QPushButton("Стоп")
         stop.clicked.connect(lambda: self._command("stop"))
-        show_browser = QPushButton("Показать браузер")
-        show_browser.clicked.connect(lambda: self._command("browser_show"))
-        hide_browser = QPushButton("Скрыть браузер")
-        hide_browser.clicked.connect(lambda: self._command("browser_hide"))
-        for button in (wake, stop, show_browser, hide_browser):
+        reload_browser = QPushButton("Перезагрузить скрытую вкладку")
+        reload_browser.clicked.connect(lambda: self._command("browser_reload"))
+        for button in (wake, stop, reload_browser):
             controls.addWidget(button)
         status_layout.addLayout(controls)
         layout.addWidget(status_group)
@@ -87,18 +90,12 @@ class SettingsWindow(QMainWindow):
 
         behavior_group = QGroupBox("Поведение")
         behavior_form = QFormLayout(behavior_group)
-        self.hide_service_browser = QCheckBox("Скрывать служебный Chromium из Plasma")
-        self.hide_service_browser.setChecked(self.cfg.browser_headless)
-        self.keep_browser_alive = QCheckBox("Оставлять Chromium запущенным после разговора")
-        self.keep_browser_alive.setChecked(self.cfg.browser_keep_alive)
         self.indicator_enabled = QCheckBox("Показывать живой круг во время Voice")
         self.indicator_enabled.setChecked(self.cfg.indicator_enabled)
         self.indicator_size = QSpinBox()
         self.indicator_size.setRange(44, 180)
         self.indicator_size.setSuffix(" px")
         self.indicator_size.setValue(self.cfg.indicator_size)
-        behavior_form.addRow(self.hide_service_browser)
-        behavior_form.addRow(self.keep_browser_alive)
         behavior_form.addRow(self.indicator_enabled)
         behavior_form.addRow("Размер круга:", self.indicator_size)
         layout.addWidget(behavior_group)
@@ -106,7 +103,6 @@ class SettingsWindow(QMainWindow):
         chat_group = QGroupBox("ChatGPT")
         chat_form = QFormLayout(chat_group)
         chat_label = QLabel(self.cfg.chat_url or "Не настроен")
-        chat_label.setTextInteractionFlags(chat_label.textInteractionFlags())
         chat_label.setWordWrap(True)
         chat_form.addRow("Закреплённый чат:", chat_label)
         layout.addWidget(chat_group)
@@ -124,7 +120,7 @@ class SettingsWindow(QMainWindow):
         self._load_microphones()
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_status)
-        self._status_timer.start(1500)
+        self._status_timer.start(1200)
         self._meter_timer = QTimer(self)
         self._meter_timer.timeout.connect(self._refresh_meter)
         self._meter_timer.start(60)
@@ -232,13 +228,14 @@ class SettingsWindow(QMainWindow):
     def _restart_service(self) -> None:
         self._stop_mic_test()
         subprocess.run(["systemctl", "--user", "restart", "egl.service"], check=False)
-        QTimer.singleShot(500, self._refresh_status)
+        QTimer.singleShot(700, self._refresh_status)
 
     def _save(self) -> None:
         self._stop_mic_test()
         self.cfg.microphone_device = self._selected_device()
-        self.cfg.browser_headless = self.hide_service_browser.isChecked()
-        self.cfg.browser_keep_alive = self.keep_browser_alive.isChecked()
+        # EGL 0.5 enforces these invariants regardless of old 0.4 settings.
+        self.cfg.browser_headless = True
+        self.cfg.browser_keep_alive = True
         self.cfg.indicator_enabled = self.indicator_enabled.isChecked()
         self.cfg.indicator_size = self.indicator_size.value()
         save_config(self.cfg)
