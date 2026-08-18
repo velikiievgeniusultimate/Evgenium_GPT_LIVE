@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .browser import find_system_browser, find_xvfb
 from .config import app_home, config_path, load_config
+from .hotword import resolve_decoder_phrases
 from .integration import integration_summary
 from .microphone import resolve_input_sample_rate
 
@@ -122,11 +123,34 @@ def run_doctor() -> int:
                 _line("OK", f"Remembered ChatGPT chat: {cfg.chat_url}")
             else:
                 _line("WARN", "Config exists but no ChatGPT chat is selected")
-            model = Path(cfg.vosk_model_path)
-            if model.exists() and (model / "conf").exists():
-                _line("OK", f"Vosk model: {model}")
+
+            model_path = Path(cfg.vosk_model_path)
+            if model_path.exists() and (model_path / "conf").exists():
+                _line("OK", f"Vosk model: {model_path}")
+                try:
+                    from vosk import Model, SetLogLevel
+
+                    SetLogLevel(-1)
+                    model = Model(str(model_path))
+                    wake_decoder = resolve_decoder_phrases(model, cfg.wake_aliases)
+                    stop_decoder = resolve_decoder_phrases(model, cfg.stop_aliases)
+                    if wake_decoder:
+                        _line("OK", f"Wake decoder phrase(s): {', '.join(wake_decoder)}")
+                    else:
+                        failures += 1
+                        _line("FAIL", f"Wake phrase cannot be represented by Vosk: {cfg.wake_phrase}")
+                    if stop_decoder:
+                        _line("OK", f"STOP decoder phrase(s): {', '.join(stop_decoder)}")
+                    else:
+                        failures += 1
+                        _line("FAIL", f"STOP phrase cannot be represented by Vosk: {cfg.stop_phrase}")
+                except Exception as exc:
+                    failures += 1
+                    _line("FAIL", f"Could not validate Vosk command grammar: {exc}")
             else:
-                _line("WARN", "Vosk model is not downloaded yet; setup will download it")
+                failures += 1
+                _line("FAIL", "Vosk model is not downloaded yet; setup will download it")
+
             _line("INFO", "Runtime browser policy: permanent + private Xvfb display")
         except Exception as exc:
             failures += 1
