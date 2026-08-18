@@ -5,17 +5,9 @@ from pathlib import Path
 
 from .browser import ChatGPTBrowser, find_system_browser
 from .config import ensure_dirs, load_config, save_config
+from .integration import install_integrations
 from .model import ensure_vosk_model
 from .service import install_service
-
-
-def list_microphones() -> None:
-    try:
-        import sounddevice as sd
-        print("\nAudio devices:")
-        print(sd.query_devices())
-    except Exception as exc:
-        print(f"Could not enumerate audio devices: {exc}")
 
 
 def run_setup(install_autostart: bool = True) -> int:
@@ -24,19 +16,11 @@ def run_setup(install_autostart: bool = True) -> int:
     print("\nEGL — Evgenium GPT LIVE setup")
     print("Wake phrase : Евгениум слушай")
     print("Stop phrase : Евгениум стоп")
+    print("Microphone  : system default (change later in the EGL GUI)")
 
     if shutil.which("pactl") is None or shutil.which("parec") is None:
         print("\nNOTE: pactl/parec not found. The orb will still breathe, but cannot react to GPT output volume.")
         print("On Arch Linux they are provided by libpulse and work with pipewire-pulse/PulseAudio compatibility.")
-
-    list_microphones()
-    current = "default" if cfg.microphone_device is None else str(cfg.microphone_device)
-    raw_device = input(f"\nMicrophone device index [{current}]: ").strip()
-    if raw_device:
-        try:
-            cfg.microphone_device = int(raw_device)
-        except ValueError:
-            print("Invalid index; keeping the current microphone selection.")
 
     ensure_vosk_model(cfg.vosk_model_url, Path(cfg.vosk_model_path))
 
@@ -53,8 +37,6 @@ def run_setup(install_autostart: bool = True) -> int:
     browser.launch_only()
     try:
         input("\nPress ENTER after the desired chat is open... ")
-        # Only now, after the human login flow is complete, attach via CDP so
-        # EGL can read the chosen URL and later control Voice buttons.
         browser.attach()
         assert browser.page is not None
         url = browser.page.url
@@ -71,12 +53,17 @@ def run_setup(install_autostart: bool = True) -> int:
     finally:
         browser.close()
 
+    installed = install_integrations()
+    for path in installed:
+        print(f"✓ integration installed: {path}")
+
     if install_autostart:
         path = install_service(enable=True)
         print(f"✓ systemd user service installed: {path}")
     print("\n✓ EGL configured.")
     print('Say: "Евгениум слушай"')
     print('Stop with: "Евгениум стоп"')
+    print("GUI: egl gui (also installed in the application menu)")
     print("Manual safety controls: egl wake / egl stop")
     print("Diagnostics: egl doctor")
     return 0
