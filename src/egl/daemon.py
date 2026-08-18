@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import shutil
 import signal
@@ -16,6 +17,7 @@ from .control import ControlServer
 from .hotword import HotwordListener
 from .indicator_client import IndicatorClient
 from .state import append_debug_event, debug_screenshot_path, write_state
+from .volume import EGL_AUDIO_APP_NAME, schedule_assistant_volume
 
 LOG = logging.getLogger(__name__)
 
@@ -33,6 +35,12 @@ def run_daemon() -> int:
     cfg = load_config()
     if not cfg.chat_url:
         raise RuntimeError("EGL is not configured. Run: egl setup")
+
+    # The hidden Chromium inherits these PulseAudio/PipeWire properties. They
+    # let EGL address only its own playback stream instead of changing the
+    # desktop/master volume or an unrelated Chromium window.
+    os.environ["PULSE_PROP_application.name"] = EGL_AUDIO_APP_NAME
+    os.environ["PULSE_PROP_media.role"] = "phone"
 
     events: queue.Queue[str] = queue.Queue()
     stopping = threading.Event()
@@ -60,8 +68,6 @@ def run_daemon() -> int:
         enqueue("wake")
 
     def stop_detected() -> None:
-        # This event is emitted in the audio thread at the exact moment the
-        # stop phrase passes the matcher, before browser automation begins.
         append_debug_event("STOP_DETECTED", cfg.stop_phrase)
         enqueue("stop")
 
@@ -141,6 +147,7 @@ def run_daemon() -> int:
         microphone=cfg.microphone_device,
         wake_threshold=cfg.wake_confidence_threshold,
         stop_threshold=cfg.stop_confidence_threshold,
+        assistant_volume=cfg.assistant_volume_percent,
         wake_aliases=cfg.wake_aliases,
         stop_aliases=cfg.stop_aliases,
     )
@@ -226,6 +233,10 @@ def run_daemon() -> int:
                         )
 
                     browser.start_voice()
+                    # Chromium creates its playback sink-input shortly after
+                    # entering Voice. Apply the saved per-assistant volume in a
+                    # background thread so wake latency is unaffected.
+                    schedule_assistant_volume(cfg.assistant_volume_percent, wait_seconds=2.5)
                     voice_active = True
                     listener.set_voice_active(True)
                     indicator.send(mode="listening")
@@ -234,6 +245,7 @@ def run_daemon() -> int:
                         "voice_started",
                         "Voice start click completed",
                         exit_button_visible=browser.is_voice_active_ui(),
+                        assistant_volume=cfg.assistant_volume_percent,
                     )
                     snapshot("after_voice_start")
                     LOG.info("ChatGPT Voice started from preloaded tab")
@@ -257,8 +269,6 @@ def run_daemon() -> int:
 
             elif command in {"stop", "end"}:
                 stop_started = time.monotonic()
-                # Visual acknowledgement happens immediately when the daemon
-                # receives STOP, not after browser automation finishes.
                 indicator.hide()
                 write_state("STOP_KILLING", "STOP accepted — terminating Voice now")
                 ui_before = bool(browser and browser.is_voice_active_ui())
@@ -286,8 +296,6 @@ def run_daemon() -> int:
 
                 voice_active = False
                 ui_after = bool(browser and browser.is_voice_active_ui())
-                # Do not block STOP completion waiting for the composer to fully
-                # warm up. Recovery happens independently in the background.
                 browser_ready = bool(browser and browser.is_running() and browser.has_voice_button())
                 total_elapsed_ms = int((time.monotonic() - stop_started) * 1000)
 
