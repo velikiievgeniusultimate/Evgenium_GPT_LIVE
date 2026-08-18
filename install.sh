@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
 VENV="$EGL_HOME/.venv"
 BIN_DIR="$HOME/.local/bin"
+CONFIG_FILE="$EGL_HOME/config/config.json"
 
 say() { printf '\033[1;36m[EGL]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[EGL ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -67,8 +68,26 @@ export PATH="$BIN_DIR:$PATH"
 
 say "EGL files live in: $EGL_HOME"
 say "CLI installed as: $BIN_DIR/egl"
-say "Running EGL doctor before interactive setup"
+say "Running EGL doctor"
 "$VENV/bin/egl" doctor
+
+# Re-running the curl installer should behave as an updater, not force the user
+# through ChatGPT login/chat selection every time.
+if [[ -f "$CONFIG_FILE" ]] && "$VENV/bin/python" - "$CONFIG_FILE" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if cfg.get("chat_url") else 1)
+PY
+then
+  say "Existing ChatGPT configuration detected; skipping interactive setup."
+  "$VENV/bin/egl" service install
+  say "Update complete. Run 'egl doctor' or 'egl service logs' if needed."
+  exit 0
+fi
 
 echo
 exec "$VENV/bin/egl" setup
