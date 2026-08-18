@@ -29,9 +29,10 @@ def install_service(enable: bool = True) -> Path:
     executable_text = _systemd_quote(str(executable))
     home_text = _systemd_quote(str(egl_home))
 
-    # Network is intentionally NOT an ordering dependency. The daemon is fully
-    # local until the wake phrase is heard, so boot/login works with VPN down.
-    # Start limiting prevents a genuine code/config crash from spinning forever.
+    # Network is intentionally NOT an ordering dependency. EGL 0.5 starts its
+    # private Xvfb + Chromium immediately, but that local browser stack is able
+    # to stay alive with VPN/network unavailable and recover the same tab later.
+    # Start limiting still protects against genuine code/config crash loops.
     unit = f"""[Unit]
 Description=Evgenium GPT LIVE (EGL)
 After=pipewire.service pipewire-pulse.service
