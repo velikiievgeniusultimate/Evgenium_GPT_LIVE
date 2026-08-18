@@ -108,6 +108,8 @@ class ChatGPTBrowser:
         self._display: str | None = None
         self.context = None
         self.page = None
+        self.last_stop_method = "never"
+        self.last_stop_elapsed_ms = 0
 
     def _endpoint(self) -> str:
         if self._debug_port is None:
@@ -324,18 +326,18 @@ class ChatGPTBrowser:
         for selector in VOICE_EXIT_SELECTORS:
             try:
                 loc = self.page.locator(selector).first
-                if loc.count() and loc.is_visible(timeout=200):
+                if loc.count() and loc.is_visible(timeout=120):
                     return True
             except Exception:
                 pass
         return False
 
-    def _wait_voice_inactive(self, timeout_s: float = 3.0) -> bool:
+    def _wait_voice_inactive(self, timeout_s: float = 0.55) -> bool:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if not self.is_voice_active_ui() and self.has_voice_button():
+            if not self.is_voice_active_ui():
                 return True
-            time.sleep(0.15)
+            time.sleep(0.06)
         return not self.is_voice_active_ui()
 
     def close(self) -> None:
@@ -390,7 +392,7 @@ class ChatGPTBrowser:
             try:
                 loc = self.page.locator(selector).first
                 if loc.count() and loc.is_visible(timeout=timeout_ms):
-                    loc.click(timeout=5_000)
+                    loc.click(timeout=2_000)
                     return True
             except Exception:
                 continue
@@ -424,30 +426,73 @@ class ChatGPTBrowser:
             raise BrowserAutomationError("Voice button disappeared before EGL could click it")
         time.sleep(0.8)
 
+    def _replace_voice_tab(self) -> bool:
+        """Destructive emergency stop: kill the current tab, keep Chromium alive."""
+        if self.context is None:
+            return False
+        old_page = self.page
+        new_page = None
+        try:
+            # Create replacement first so Chromium never becomes windowless.
+            new_page = self.context.new_page()
+            self.page = new_page
+            if old_page is not None:
+                try:
+                    old_page.close(run_before_unload=False)
+                except Exception:
+                    LOG.debug("Old Voice page resisted close", exc_info=True)
+            target = self.chat_url or CHATGPT_ORIGIN
+            try:
+                new_page.goto(target, wait_until="commit", timeout=5_000)
+            except Exception:
+                # Closing the old page already tears down its WebRTC session;
+                # page readiness can recover later in the daemon.
+                LOG.debug("Replacement ChatGPT page is still loading", exc_info=True)
+            return True
+        except Exception:
+            LOG.exception("Could not replace Voice tab")
+            if new_page is not None:
+                self.page = new_page
+            return False
+
     def stop_voice(self) -> bool:
-        """Stop Voice and verify that the Voice UI actually disappeared."""
+        """Stop Voice aggressively and record which kill path was required.
+
+        Normal Exit is given only a very short grace period. If ChatGPT does not
+        visibly leave Voice almost immediately, EGL navigates away from the Voice
+        view. If navigation itself is wedged, EGL destroys that tab and creates a
+        fresh one in the same long-lived Chromium process/profile.
+        """
+        started = time.monotonic()
+        self.last_stop_method = "no_page"
+        self.last_stop_elapsed_ms = 0
         if self.page is None:
             return True
 
-        clicked = self._click_first(VOICE_EXIT_SELECTORS, timeout_ms=900)
-        if clicked and self._wait_voice_inactive(timeout_s=3.5):
-            return True
+        try:
+            clicked = self._click_first(VOICE_EXIT_SELECTORS, timeout_ms=250)
+            if clicked and self._wait_voice_inactive(timeout_s=0.55):
+                self.last_stop_method = "exit_click"
+                return True
 
-        # If the selector changed or the click did not actually exit Voice,
-        # navigate back to the remembered chat. This tears down the Voice view
-        # while preserving the permanent browser process/profile.
-        if self.chat_url:
-            try:
-                self.page.goto(
-                    self.chat_url,
-                    wait_until="domcontentloaded",
-                    timeout=NAVIGATION_TIMEOUT_MS,
-                )
-            except Exception:
-                LOG.warning("Could not restore remembered chat after Voice stop", exc_info=True)
-                return False
+            # Do not spend seconds hoping the UI catches up. Navigating away
+            # destroys the Voice document/WebRTC session immediately.
+            if self.chat_url:
+                try:
+                    self.page.goto(self.chat_url, wait_until="commit", timeout=4_000)
+                    if self._wait_voice_inactive(timeout_s=0.25):
+                        self.last_stop_method = "forced_navigation"
+                        return True
+                except Exception:
+                    LOG.warning("Aggressive Voice navigation fallback failed", exc_info=True)
 
-        return self._wait_voice_inactive(timeout_s=3.0)
+            # Last resort: physically destroy the page that owns the WebRTC
+            # session. Chromium, profile and authentication remain alive.
+            replaced = self._replace_voice_tab()
+            self.last_stop_method = "tab_replaced" if replaced else "failed"
+            return replaced
+        finally:
+            self.last_stop_elapsed_ms = int((time.monotonic() - started) * 1000)
 
     def _button_labels(self) -> list[str]:
         if self.page is None:
