@@ -46,6 +46,15 @@ StartupNotify=true
 StartupWMClass=EGLSettings
 """
     target.write_text(content, encoding="utf-8")
+
+    sycoca = shutil.which("kbuildsycoca6") or shutil.which("kbuildsycoca5")
+    if sycoca:
+        subprocess.run(
+            [sycoca],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     return target
 
 
