@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="0.2.0"
+BOOTSTRAP_VERSION="0.2.1"
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
 EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
@@ -37,28 +37,21 @@ install_system_deps() {
   say "Checking/installing required Linux dependencies (sudo may ask for your password)..."
 
   if command -v pacman >/dev/null 2>&1; then
-    # Required for Python packages and microphone capture.
     run_root pacman -S --needed --noconfirm git python python-pip portaudio
-
-    # Optional: only makes the orb react to desktop/GPT output volume.
-    # Arch provides pactl/parec via libpulse; this must never block EGL itself.
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
       run_root pacman -S --needed --noconfirm libpulse || warn "Could not install libpulse; EGL will work, but the orb may not react to output volume."
     fi
-
   elif command -v apt-get >/dev/null 2>&1; then
     run_root apt-get update
     run_root apt-get install -y git python3 python3-venv python3-pip libportaudio2
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
       run_root apt-get install -y pulseaudio-utils || warn "Could not install pulseaudio-utils; the audio-reactive orb is optional."
     fi
-
   elif command -v dnf >/dev/null 2>&1; then
     run_root dnf install -y git python3 python3-pip portaudio
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
       run_root dnf install -y pulseaudio-utils || warn "Could not install pulseaudio-utils; the audio-reactive orb is optional."
     fi
-
   else
     warn "Unknown package manager. Continuing if git, Python and PortAudio are already available."
   fi
