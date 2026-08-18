@@ -86,14 +86,7 @@ def _free_x_display() -> str:
 
 
 class ChatGPTBrowser:
-    """Drive EGL's dedicated Chromium profile through DevTools/CDP.
-
-    Setup uses a normal visible system browser so the user can authenticate.
-    Runtime can use a private Xvfb display. In that mode Chromium is still a
-    real headed browser (important for WebRTC/audio), but its window literally
-    does not belong to the user's Plasma/Wayland desktop and cannot flash into
-    the taskbar, Alt+Tab or overview.
-    """
+    """Drive EGL's dedicated Chromium profile through DevTools/CDP."""
 
     def __init__(
         self,
@@ -170,7 +163,6 @@ class ChatGPTBrowser:
         raise BrowserAutomationError("EGL Xvfb did not become ready in time")
 
     def launch_only(self) -> None:
-        """Launch Chromium and wait for DevTools, without attaching Playwright."""
         if self.is_running():
             return
 
@@ -197,9 +189,6 @@ class ChatGPTBrowser:
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
         ]
-        # Only service/runtime windows get the EGL class. The visible setup
-        # browser must remain a normal Chromium window so the old KWin guard
-        # cannot hide it while the user is logging in.
         if self.virtual_display or self.background:
             args.append("--class=EvgeniumGPT")
 
@@ -322,6 +311,33 @@ class ChatGPTBrowser:
     def reload_chat(self, *, timeout_ms: int = 15_000) -> bool:
         return self.ensure_chat_ready(timeout_ms=timeout_ms, reload=True)
 
+    def capture_screenshot(self, path: Path) -> Path:
+        if self.page is None:
+            raise BrowserAutomationError("ChatGPT page is not attached")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.page.screenshot(path=str(path), full_page=False)
+        return path
+
+    def is_voice_active_ui(self) -> bool:
+        if self.page is None:
+            return False
+        for selector in VOICE_EXIT_SELECTORS:
+            try:
+                loc = self.page.locator(selector).first
+                if loc.count() and loc.is_visible(timeout=200):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _wait_voice_inactive(self, timeout_s: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if not self.is_voice_active_ui() and self.has_voice_button():
+                return True
+            time.sleep(0.15)
+        return not self.is_voice_active_ui()
+
     def close(self) -> None:
         if self._browser:
             try:
@@ -408,13 +424,18 @@ class ChatGPTBrowser:
             raise BrowserAutomationError("Voice button disappeared before EGL could click it")
         time.sleep(0.8)
 
-    def stop_voice(self) -> None:
+    def stop_voice(self) -> bool:
+        """Stop Voice and verify that the Voice UI actually disappeared."""
         if self.page is None:
-            return
-        if self._click_first(VOICE_EXIT_SELECTORS, timeout_ms=700):
-            time.sleep(0.4)
-            return
+            return True
 
+        clicked = self._click_first(VOICE_EXIT_SELECTORS, timeout_ms=900)
+        if clicked and self._wait_voice_inactive(timeout_s=3.5):
+            return True
+
+        # If the selector changed or the click did not actually exit Voice,
+        # navigate back to the remembered chat. This tears down the Voice view
+        # while preserving the permanent browser process/profile.
         if self.chat_url:
             try:
                 self.page.goto(
@@ -424,6 +445,9 @@ class ChatGPTBrowser:
                 )
             except Exception:
                 LOG.warning("Could not restore remembered chat after Voice stop", exc_info=True)
+                return False
+
+        return self._wait_voice_inactive(timeout_s=3.0)
 
     def _button_labels(self) -> list[str]:
         if self.page is None:
