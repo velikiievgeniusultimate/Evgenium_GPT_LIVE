@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="0.5.0"
+BOOTSTRAP_VERSION="0.5.1"
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
 EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
@@ -45,8 +45,6 @@ install_system_deps() {
   say "Checking/installing required Linux dependencies (sudo may ask for your password)..."
 
   if command -v pacman >/dev/null 2>&1; then
-    # Xvfb is required by EGL 0.5+: the permanent runtime Chromium lives on a
-    # private virtual X display and therefore has no visible Plasma window.
     run_root pacman -S --needed --noconfirm git python python-pip portaudio xorg-server-xvfb
 
     if ! has_system_browser; then
