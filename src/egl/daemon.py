@@ -50,23 +50,31 @@ def run_daemon() -> int:
     indicator = IndicatorClient(cfg.indicator_enabled, cfg.indicator_size, cfg.indicator_margin)
     meter = OutputAudioMeter()
 
-    def hotword_debug(text: str, active: bool, wake_match: bool, stop_match: bool) -> None:
-        append_debug_event(
-            "hotword_heard",
-            text,
-            voice_active=active,
-            wake_match=wake_match,
-            stop_match=stop_match,
-        )
+    def hotword_debug(observation: dict[str, object]) -> None:
+        payload = dict(observation)
+        text = str(payload.pop("text", ""))
+        append_debug_event("hotword_heard", text, **payload)
+
+    def wake_detected() -> None:
+        append_debug_event("WAKE_ACCEPTED", cfg.wake_phrase)
+        enqueue("wake")
+
+    def stop_detected() -> None:
+        # This event is emitted in the audio thread at the exact moment the
+        # stop phrase passes the matcher, before browser automation begins.
+        append_debug_event("STOP_DETECTED", cfg.stop_phrase)
+        enqueue("stop")
 
     listener = HotwordListener(
         model_path=Path(cfg.vosk_model_path),
         wake_aliases=cfg.wake_aliases,
         stop_aliases=cfg.stop_aliases,
-        on_wake=lambda: enqueue("wake"),
-        on_stop=lambda: enqueue("stop"),
+        on_wake=wake_detected,
+        on_stop=stop_detected,
         microphone_device=cfg.microphone_device,
         on_debug=hotword_debug,
+        wake_confidence_threshold=cfg.wake_confidence_threshold,
+        stop_confidence_threshold=cfg.stop_confidence_threshold,
     )
     control = ControlServer(enqueue)
 
@@ -127,7 +135,15 @@ def run_daemon() -> int:
     listener.start()
     control.start()
     meter.start()
-    append_debug_event("daemon_started", "EGL daemon started", microphone=cfg.microphone_device)
+    append_debug_event(
+        "daemon_started",
+        "EGL daemon started",
+        microphone=cfg.microphone_device,
+        wake_threshold=cfg.wake_confidence_threshold,
+        stop_threshold=cfg.stop_confidence_threshold,
+        wake_aliases=cfg.wake_aliases,
+        stop_aliases=cfg.stop_aliases,
+    )
 
     write_state("starting_browser", "starting permanent hidden ChatGPT tab")
     try:
@@ -240,41 +256,70 @@ def run_daemon() -> int:
                     idle_state()
 
             elif command in {"stop", "end"}:
-                write_state("stopping_voice", "closing and verifying Voice UI")
+                stop_started = time.monotonic()
+                # Visual acknowledgement happens immediately when the daemon
+                # receives STOP, not after browser automation finishes.
+                indicator.hide()
+                write_state("STOP_KILLING", "STOP accepted — terminating Voice now")
+                ui_before = bool(browser and browser.is_voice_active_ui())
                 append_debug_event(
-                    "voice_stop_begin",
-                    "stop/end command accepted",
+                    "STOP_SENT",
+                    "stop/end command accepted by daemon",
                     internal_voice_active=voice_active,
-                    ui_active_before=bool(browser and browser.is_voice_active_ui()),
+                    ui_active_before=ui_before,
                 )
                 listener.set_voice_active(False)
+
                 verified = True
+                method = "no_browser"
+                browser_elapsed_ms = 0
                 try:
                     if browser is not None:
                         verified = browser.stop_voice()
+                        method = browser.last_stop_method
+                        browser_elapsed_ms = browser.last_stop_elapsed_ms
                 except Exception as exc:
                     verified = False
-                    LOG.exception("Voice stop fallback failed")
-                    append_debug_event("voice_stop_exception", str(exc))
+                    method = "exception"
+                    LOG.exception("Aggressive Voice stop failed")
+                    append_debug_event("STOP_EXCEPTION", str(exc))
+
                 voice_active = False
-                indicator.hide()
-                browser_ready = bool(
-                    browser
-                    and browser.is_running()
-                    and browser.ensure_chat_ready(timeout_ms=5_000)
+                ui_after = bool(browser and browser.is_voice_active_ui())
+                # Do not block STOP completion waiting for the composer to fully
+                # warm up. Recovery happens independently in the background.
+                browser_ready = bool(browser and browser.is_running() and browser.has_voice_button())
+                total_elapsed_ms = int((time.monotonic() - stop_started) * 1000)
+
+                append_debug_event(
+                    "STOP_CONFIRMED" if verified and not ui_after else "STOP_FAILED",
+                    "Voice termination verification finished",
+                    verified=verified,
+                    stop_method=method,
+                    browser_stop_ms=browser_elapsed_ms,
+                    total_stop_ms=total_elapsed_ms,
+                    ui_active_after=ui_after,
+                    browser_ready=browser_ready,
                 )
                 append_debug_event(
                     "voice_stopped",
                     "Voice stop verification finished",
                     verified=verified,
-                    ui_active_after=bool(browser and browser.is_voice_active_ui()),
+                    stop_method=method,
+                    elapsed_ms=total_elapsed_ms,
+                    ui_active_after=ui_after,
                     browser_ready=browser_ready,
                 )
                 snapshot("after_voice_stop")
                 if not browser_ready:
-                    next_page_refresh = time.monotonic() + 2.0
+                    next_page_refresh = time.monotonic() + 0.5
                 idle_state()
-                LOG.info("ChatGPT Voice stop finished; verified=%s", verified)
+                LOG.info(
+                    "ChatGPT Voice stop finished; verified=%s method=%s elapsed=%dms",
+                    verified,
+                    method,
+                    total_elapsed_ms,
+                )
 
             elif command in {"debug_snapshot", "browser_snapshot"}:
                 snapshot("manual_debug_snapshot")
