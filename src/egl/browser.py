@@ -12,6 +12,7 @@ from pathlib import Path
 
 LOG = logging.getLogger(__name__)
 CHATGPT_ORIGIN = "https://chatgpt.com"
+NAVIGATION_TIMEOUT_MS = 15_000
 
 VOICE_START_SELECTORS = [
     'button[data-testid="composer-speech-button"]',
@@ -72,17 +73,12 @@ def _free_local_port() -> int:
 
 
 class ChatGPTBrowser:
-    """Drive a normal Chromium-family browser through DevTools/CDP.
+    """Drive a dedicated normal Chromium-family browser through DevTools/CDP.
 
-    The browser process is launched directly, not by Playwright. During first
-    setup EGL can deliberately delay Playwright attachment until *after* the
-    user has completed Cloudflare/login and opened the desired chat. Runtime
-    sessions attach immediately because the dedicated profile is already
-    authenticated.
-
-    The historical `headless` argument is preserved for config compatibility.
-    EGL no longer uses true headless mode: when true, the normal browser starts
-    minimized so WebRTC/audio behave like a desktop browser.
+    First-time setup launches a visible browser without Playwright attached.
+    Runtime uses the same persistent profile but launches it minimized. On KDE
+    the optional EGL KWin script additionally removes the service window from
+    the taskbar, pager and Alt+Tab.
     """
 
     def __init__(self, profile: Path, chat_url: str, headless: bool = True) -> None:
@@ -101,9 +97,12 @@ class ChatGPTBrowser:
             raise BrowserAutomationError("Browser DevTools port is not initialized")
         return f"http://127.0.0.1:{self._debug_port}"
 
+    def is_running(self) -> bool:
+        return bool(self._browser_process and self._browser_process.poll() is None)
+
     def launch_only(self) -> None:
-        """Launch a normal browser and wait for DevTools, without automation."""
-        if self._browser_process and self._browser_process.poll() is None:
+        """Launch the normal browser and wait for DevTools, without automation."""
+        if self.is_running():
             return
 
         executable = find_system_browser()
@@ -129,7 +128,9 @@ class ChatGPTBrowser:
             "--disable-renderer-backgrounding",
         ]
         if self.background:
-            args.append("--start-minimized")
+            # Chromium officially supports --class on Linux. It gives KWin an
+            # EGL-specific windowClass so no other Chromium windows are touched.
+            args.extend(["--start-minimized", "--class=EvgeniumGPT"])
         args.append(target)
 
         LOG.info("Launching system browser for EGL: %s", executable)
@@ -167,34 +168,62 @@ class ChatGPTBrowser:
 
         if self._browser is not None:
             return
-        if not self._browser_process or self._browser_process.poll() is not None:
+        if not self.is_running():
             raise BrowserAutomationError("System browser is not running")
 
-        self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.connect_over_cdp(self._endpoint())
-        contexts = self._browser.contexts
-        if not contexts:
-            self.close()
-            raise BrowserAutomationError("Connected browser did not expose a default context")
-        self.context = contexts[0]
-
         try:
-            self.context.grant_permissions(["microphone"], origin=CHATGPT_ORIGIN)
-        except Exception:
-            LOG.warning("Could not pre-grant microphone permission", exc_info=True)
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.connect_over_cdp(self._endpoint())
+            contexts = self._browser.contexts
+            if not contexts:
+                raise BrowserAutomationError("Connected browser did not expose a default context")
+            self.context = contexts[0]
 
-        pages = self.context.pages
-        self.page = pages[-1] if pages else self.context.new_page()
+            try:
+                self.context.grant_permissions(["microphone"], origin=CHATGPT_ORIGIN)
+            except Exception:
+                LOG.warning("Could not pre-grant microphone permission", exc_info=True)
 
-        # Runtime should always land on the remembered chat. During setup
-        # chat_url is empty, so we intentionally leave the page exactly where
-        # the human user navigated before attachment.
-        if self.chat_url and not self.page.url.startswith(self.chat_url):
-            self.page.goto(self.chat_url, wait_until="domcontentloaded", timeout=60_000)
+            pages = self.context.pages
+            self.page = pages[0] if pages else self.context.new_page()
+            target = self.chat_url or CHATGPT_ORIGIN
+            if not self.page.url.startswith(target):
+                self.page.goto(target, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            if self.background:
+                self.hide_window()
+        except BrowserAutomationError:
+            raise
+        except Exception as exc:
+            raise BrowserAutomationError(f"Could not attach/open ChatGPT: {exc}") from exc
 
     def open(self) -> None:
         self.launch_only()
         self.attach()
+
+    def _set_window_state(self, state: str) -> None:
+        if self._browser is None or self.context is None or self.page is None:
+            raise BrowserAutomationError("Browser is not attached")
+        try:
+            session = self.context.new_cdp_session(self.page)
+            info = session.send("Browser.getWindowForTarget")
+            session.send(
+                "Browser.setWindowBounds",
+                {"windowId": info["windowId"], "bounds": {"windowState": state}},
+            )
+            session.detach()
+        except Exception as exc:
+            raise BrowserAutomationError(f"Could not change browser window state: {exc}") from exc
+
+    def show_window(self) -> None:
+        self._set_window_state("normal")
+        assert self.page is not None
+        try:
+            self.page.bring_to_front()
+        except Exception:
+            LOG.debug("Could not bring EGL browser to front", exc_info=True)
+
+    def hide_window(self) -> None:
+        self._set_window_state("minimized")
 
     def close(self) -> None:
         if self._browser:
@@ -256,15 +285,24 @@ class ChatGPTBrowser:
 
     def start_voice(self) -> None:
         assert self.page is not None
-        if self.chat_url and not self.page.url.startswith(self.chat_url):
-            self.page.goto(self.chat_url, wait_until="domcontentloaded", timeout=60_000)
-        if not self._click_first(VOICE_START_SELECTORS, timeout_ms=900):
-            labels = self._button_labels()
-            raise BrowserAutomationError(
-                "Voice button not found. ChatGPT web UI may have changed. "
-                f"Visible button labels: {labels[:20]}"
-            )
-        time.sleep(1.0)
+        try:
+            if self.chat_url and not self.page.url.startswith(self.chat_url):
+                self.page.goto(
+                    self.chat_url,
+                    wait_until="domcontentloaded",
+                    timeout=NAVIGATION_TIMEOUT_MS,
+                )
+            if not self._click_first(VOICE_START_SELECTORS, timeout_ms=1200):
+                labels = self._button_labels()
+                raise BrowserAutomationError(
+                    "Voice button not found. ChatGPT may be unreachable or the web UI changed. "
+                    f"Visible button labels: {labels[:20]}"
+                )
+            time.sleep(1.0)
+        except BrowserAutomationError:
+            raise
+        except Exception as exc:
+            raise BrowserAutomationError(f"Could not open ChatGPT Voice: {exc}") from exc
 
     def stop_voice(self) -> None:
         assert self.page is not None
@@ -272,9 +310,13 @@ class ChatGPTBrowser:
             time.sleep(0.4)
             return
         if self.chat_url:
-            self.page.goto(self.chat_url, wait_until="domcontentloaded", timeout=60_000)
+            self.page.goto(
+                self.chat_url,
+                wait_until="domcontentloaded",
+                timeout=NAVIGATION_TIMEOUT_MS,
+            )
         else:
-            self.page.goto(CHATGPT_ORIGIN, wait_until="domcontentloaded", timeout=60_000)
+            self.page.goto(CHATGPT_ORIGIN, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
 
     def _button_labels(self) -> list[str]:
         assert self.page is not None
