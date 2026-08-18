@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="0.3.0"
+BOOTSTRAP_VERSION="0.4.0"
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
 EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
@@ -47,15 +47,11 @@ install_system_deps() {
   if command -v pacman >/dev/null 2>&1; then
     run_root pacman -S --needed --noconfirm git python python-pip portaudio
 
-    # EGL 0.3+ intentionally authenticates ChatGPT in a normal system browser,
-    # not Playwright's test browser. Install Arch Chromium when no supported
-    # Chromium-family browser is already present.
     if ! has_system_browser; then
       say "No normal Chromium-family browser found; installing Arch Chromium."
       run_root pacman -S --needed --noconfirm chromium
     fi
 
-    # Optional: only makes the orb react to desktop/GPT output volume.
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
       run_root pacman -S --needed --noconfirm libpulse || warn "Could not install libpulse; EGL will work, but the orb may not react to output volume."
     fi
