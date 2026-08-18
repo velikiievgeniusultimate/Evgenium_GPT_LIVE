@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import queue
+import shutil
 import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -16,6 +18,15 @@ from .indicator_client import IndicatorClient
 from .state import write_state
 
 LOG = logging.getLogger(__name__)
+
+
+def _notify(summary: str, body: str) -> None:
+    if shutil.which("notify-send"):
+        subprocess.Popen(
+            ["notify-send", "-a", "EGL", summary, body],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def run_daemon() -> int:
@@ -48,18 +59,40 @@ def run_daemon() -> int:
     )
     control = ControlServer(enqueue)
     voice_active = False
+    browser: ChatGPTBrowser | None = None
 
-    write_state("starting", "launching browser")
-    browser = ChatGPTBrowser(Path(cfg.browser_profile_path), cfg.chat_url, cfg.browser_headless)
+    def close_browser() -> None:
+        nonlocal browser
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                LOG.exception("Could not close EGL browser cleanly")
+        browser = None
+
+    def ensure_browser() -> ChatGPTBrowser:
+        nonlocal browser
+        if browser is not None and browser.is_running():
+            return browser
+        close_browser()
+        browser = ChatGPTBrowser(
+            Path(cfg.browser_profile_path),
+            cfg.chat_url,
+            cfg.browser_headless,
+        )
+        browser.open()
+        return browser
+
+    # Deliberately start only local pieces here. Chromium is lazy-launched on
+    # wake. This makes boot independent of internet/VPN availability and avoids
+    # any browser window/process until the assistant is actually requested.
+    listener.start()
+    control.start()
+    meter.start()
+    write_state("idle", f'waiting for "{cfg.wake_phrase}"')
+    LOG.info('EGL ready without browser. Wake phrase: "%s"', cfg.wake_phrase)
 
     try:
-        browser.open()
-        listener.start()
-        control.start()
-        meter.start()
-        write_state("idle", f'waiting for "{cfg.wake_phrase}"')
-        LOG.info('EGL ready. Wake phrase: "%s"', cfg.wake_phrase)
-
         while not stopping.is_set():
             try:
                 command = events.get(timeout=0.05)
@@ -70,17 +103,25 @@ def run_daemon() -> int:
                 write_state("starting_voice", "opening ChatGPT Voice")
                 indicator.show("starting")
                 try:
-                    browser.start_voice()
+                    current = ensure_browser()
+                    current.start_voice()
                     voice_active = True
                     listener.set_voice_active(True)
                     indicator.send(mode="listening")
                     write_state("listening", f'waiting for "{cfg.stop_phrase}"')
                     LOG.info("ChatGPT Voice started")
-                except BrowserAutomationError as exc:
-                    LOG.error("Could not start voice: %s", exc)
+                except Exception as exc:
+                    LOG.error("Could not start ChatGPT Voice: %s", exc, exc_info=True)
+                    close_browser()
+                    voice_active = False
+                    listener.set_voice_active(False)
                     indicator.send(mode="error")
                     write_state("error", str(exc))
-                    time.sleep(1.2)
+                    _notify(
+                        "EGL не смог открыть ChatGPT",
+                        "Проверь VPN/сеть. EGL не будет повторять попытку сам — скажи «Евгениум слушай» ещё раз.",
+                    )
+                    time.sleep(1.5)
                     indicator.hide()
                     write_state("idle", f'waiting for "{cfg.wake_phrase}"')
 
@@ -88,13 +129,37 @@ def run_daemon() -> int:
                 write_state("stopping_voice", "closing ChatGPT Voice")
                 listener.set_voice_active(False)
                 try:
-                    browser.stop_voice()
+                    if browser is not None:
+                        browser.stop_voice()
                 except Exception:
                     LOG.exception("Voice stop fallback failed")
                 voice_active = False
                 indicator.hide()
+                if not cfg.browser_keep_alive:
+                    close_browser()
                 write_state("idle", f'waiting for "{cfg.wake_phrase}"')
                 LOG.info("ChatGPT Voice stopped")
+
+            elif command == "browser_show":
+                try:
+                    current = ensure_browser()
+                    current.show_window()
+                    write_state("browser_visible", "service browser shown by user")
+                except Exception as exc:
+                    LOG.error("Could not show browser: %s", exc, exc_info=True)
+                    write_state("error", str(exc))
+                    _notify("EGL", f"Не удалось показать браузер: {exc}")
+
+            elif command == "browser_hide":
+                try:
+                    if browser is not None and browser.is_running():
+                        browser.hide_window()
+                    write_state(
+                        "listening" if voice_active else "idle",
+                        f'waiting for "{cfg.stop_phrase if voice_active else cfg.wake_phrase}"',
+                    )
+                except Exception as exc:
+                    LOG.error("Could not hide browser: %s", exc, exc_info=True)
 
             elif command in {"shutdown", "quit"}:
                 stopping.set()
@@ -109,6 +174,6 @@ def run_daemon() -> int:
         listener.close()
         meter.close()
         indicator.close()
-        browser.close()
+        close_browser()
         write_state("offline")
     return 0
