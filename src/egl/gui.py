@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from .config import load_config, save_config
 from .control import send_command
 from .integration import install_integrations
+from .microphone import input_device_label, resolve_input_sample_rate
 from .state import debug_screenshot_path, read_debug_events, read_state
 
 
@@ -150,7 +151,6 @@ class DebugWindow(QDialog):
             if e.get("event") in {"STOP_DETECTED", "STOP_SENT", "STOP_CONFIRMED", "STOP_FAILED"}
         ]
         if stop_events:
-            # Show the latest complete pipeline rather than a vague boolean.
             latest = stop_events[-1]
             event = str(latest.get("event"))
             if event == "STOP_CONFIRMED":
@@ -338,8 +338,7 @@ class SettingsWindow(QMainWindow):
             for index, device in enumerate(sd.query_devices()):
                 if int(device.get("max_input_channels", 0)) <= 0:
                     continue
-                name = str(device.get("name", f"Device {index}"))
-                self.microphone.addItem(f"{index}: {name}", index)
+                self.microphone.addItem(input_device_label(device, index), index)
         except Exception as exc:
             self.microphone.addItem(f"Ошибка чтения устройств: {exc}", "error")
 
@@ -360,16 +359,19 @@ class SettingsWindow(QMainWindow):
         try:
             import sounddevice as sd
 
+            device = self._selected_device()
+            sample_rate = resolve_input_sample_rate(sd, device)
+            blocksize = max(320, int(round(sample_rate * 0.10)))
             self._mic_stream = sd.RawInputStream(
-                samplerate=16000,
-                blocksize=1600,
+                samplerate=sample_rate,
+                blocksize=blocksize,
                 dtype="int16",
                 channels=1,
-                device=self._selected_device(),
+                device=device,
                 callback=self._mic_callback,
             )
             self._mic_stream.start()
-            self.test_button.setText("Остановить тест")
+            self.test_button.setText(f"Остановить тест ({sample_rate} Hz)")
         except Exception as exc:
             self._mic_stream = None
             QMessageBox.warning(self, "EGL", f"Не удалось открыть микрофон:\n{exc}")
