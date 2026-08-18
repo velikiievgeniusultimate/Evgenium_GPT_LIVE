@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="0.5.4"
+BOOTSTRAP_VERSION="0.5.5"
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
 EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
@@ -53,7 +53,7 @@ install_system_deps() {
     fi
 
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
-      run_root pacman -S --needed --noconfirm libpulse || warn "Could not install libpulse; EGL will work, but the orb may not react to output volume."
+      run_root pacman -S --needed --noconfirm libpulse || warn "Could not install libpulse; EGL will work, but the orb may not react to output volume and per-assistant volume control may be unavailable."
     fi
 
   elif command -v apt-get >/dev/null 2>&1; then
@@ -63,7 +63,7 @@ install_system_deps() {
       warn "No supported Chromium-family browser detected. Install Chromium/Chrome before EGL setup or set EGL_BROWSER=/path/to/browser."
     fi
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
-      run_root apt-get install -y pulseaudio-utils || warn "Could not install pulseaudio-utils; the audio-reactive orb is optional."
+      run_root apt-get install -y pulseaudio-utils || warn "Could not install pulseaudio-utils; orb reaction and per-assistant volume control may be unavailable."
     fi
 
   elif command -v dnf >/dev/null 2>&1; then
@@ -72,7 +72,7 @@ install_system_deps() {
       warn "No supported Chromium-family browser detected. Install Chromium/Chrome before EGL setup or set EGL_BROWSER=/path/to/browser."
     fi
     if ! command -v pactl >/dev/null 2>&1 || ! command -v parec >/dev/null 2>&1; then
-      run_root dnf install -y pulseaudio-utils || warn "Could not install pulseaudio-utils; the audio-reactive orb is optional."
+      run_root dnf install -y pulseaudio-utils || warn "Could not install pulseaudio-utils; orb reaction and per-assistant volume control may be unavailable."
     fi
 
   else
