@@ -16,8 +16,6 @@ mkdir -p "$EGL_HOME" "$BIN_DIR"
 SYSTEM_PY="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 say "System Python: $(python3 --version 2>&1)"
 
-# Arch is rolling-release. A venv created by an older Python minor version can
-# silently become unusable after a system upgrade, so rebuild only when needed.
 if [[ -x "$VENV/bin/python" ]]; then
   VENV_PY="$($VENV/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
   if [[ "$VENV_PY" != "$SYSTEM_PY" ]]; then
@@ -47,10 +45,6 @@ for name in mods:
     print(f"  OK {name}")
 PY
 
-# EGL 0.3+ does not launch Playwright's Chrome for Testing. Playwright is used
-# only as a CDP client attached to the normal system Chromium/Chrome process.
-# This avoids downloading ~300 MB of test-browser binaries and makes first-time
-# ChatGPT authentication happen in a normal browser.
 ln -sfn "$VENV/bin/egl" "$BIN_DIR/egl"
 
 export EGL_HOME
@@ -58,11 +52,13 @@ export PATH="$BIN_DIR:$PATH"
 
 say "EGL files live in: $EGL_HOME"
 say "CLI installed as: $BIN_DIR/egl"
+
+say "Installing desktop/KDE integration"
+"$VENV/bin/egl" integration install
+
 say "Running EGL doctor"
 "$VENV/bin/egl" doctor
 
-# Re-running the curl installer should behave as an updater, not force the user
-# through ChatGPT login/chat selection every time.
 if [[ -f "$CONFIG_FILE" ]] && "$VENV/bin/python" - "$CONFIG_FILE" <<'PY'
 import json, sys
 try:
@@ -75,13 +71,10 @@ PY
 then
   say "Existing ChatGPT configuration detected; skipping interactive setup."
   "$VENV/bin/egl" service install
-  say "Update complete. Run 'egl doctor' or 'egl service logs' if needed."
+  say "Update complete. Open 'Evgenium GPT LIVE' from the application menu or run: egl gui"
   exit 0
 fi
 
-# A `curl ... | bash` bootstrap consumes stdin. First-time setup is interactive,
-# so reconnect it explicitly to the user's controlling terminal instead of
-# inheriting EOF from the curl pipe.
 echo
 if [[ -r /dev/tty ]]; then
   exec "$VENV/bin/egl" setup </dev/tty
