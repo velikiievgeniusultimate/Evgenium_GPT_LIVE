@@ -22,6 +22,10 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(Path(cfg.vosk_model_path).is_relative_to(egl_home))
                 self.assertTrue(cfg.browser_headless)
                 self.assertTrue(cfg.browser_keep_alive)
+                self.assertEqual(cfg.wake_aliases, ["евгениум слушай"])
+                self.assertEqual(cfg.stop_aliases, ["евгениум стоп"])
+                self.assertAlmostEqual(cfg.wake_confidence_threshold, 0.86)
+                self.assertAlmostEqual(cfg.stop_confidence_threshold, 0.35)
 
                 cfg.chat_url = "https://chatgpt.com/c/test"
                 cfg.microphone_device = 7
@@ -35,16 +39,19 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(loaded.browser_headless)
                 self.assertTrue(loaded.browser_keep_alive)
 
-                # Simulate a 0.4 config that explicitly asked EGL to close/show
-                # the browser. 0.5 must migrate it to the fixed permanent-hidden
-                # runtime contract.
+                # Simulate an old config with soft aliases and browser policy
+                # choices. Current EGL must migrate all of them.
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 raw["browser_headless"] = False
                 raw["browser_keep_alive"] = False
+                raw["wake_aliases"] = ["евгениум слушай", "евгений слушай", "евгениум слушает"]
+                raw["stop_aliases"] = ["евгениум стоп", "евгений стоп"]
                 path.write_text(json.dumps(raw), encoding="utf-8")
                 migrated = c.load_config()
                 self.assertTrue(migrated.browser_headless)
                 self.assertTrue(migrated.browser_keep_alive)
+                self.assertEqual(migrated.wake_aliases, ["евгениум слушай"])
+                self.assertEqual(migrated.stop_aliases, ["евгениум стоп"])
             finally:
                 if old_home is None:
                     os.environ.pop("EGL_HOME", None)
