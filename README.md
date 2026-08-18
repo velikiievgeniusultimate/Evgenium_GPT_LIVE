@@ -2,7 +2,7 @@
 
 **EGL** turns the regular ChatGPT **Web Voice** session into a Linux-native voice assistant with local wake/stop phrases, a persistent authenticated browser profile, autostart, GUI settings, live debugging and a desktop orb.
 
-Current version: **0.5.2**. Arch Linux + KDE Plasma is the primary target.
+Current version: **0.5.4**. Arch Linux + KDE Plasma is the primary target.
 
 ## What it should feel like
 
@@ -21,7 +21,7 @@ curl -fsSL "https://raw.githubusercontent.com/velikiievgeniusultimate/Evgenium_G
 You should see:
 
 ```text
-[EGL] Evgenium GPT LIVE bootstrap v0.5.2
+[EGL] Evgenium GPT LIVE bootstrap v0.5.4
 [EGL] Target ref: main
 [EGL] Install directory: /home/.../Evgenium_GPT
 ```
@@ -49,20 +49,35 @@ The runtime Chromium is a normal headed browser for WebRTC/audio reliability, bu
 
 ## Strict wake / aggressive STOP
 
-EGL 0.5.2 deliberately treats wake and stop very differently.
+EGL treats wake and stop very differently.
 
 ### Wake
 
 Wake is conservative:
 
-- the old soft aliases such as `евгений слушай` and `евгениум слушает` are removed;
-- only the configured canonical phrase is accepted;
 - **partial Vosk results can never start Voice**;
 - the phrase must appear in a final Vosk result;
 - Vosk word confidences are enabled and the minimum confidence of all decoded words must pass the configured threshold;
-- default wake threshold: **86%**.
+- default wake threshold: **86%**;
+- matching is exact against the decoder phrase, not fuzzy/suffix matching.
 
-This specifically prevents the old failure mode where a transient partial hypothesis could accidentally wake EGL before Vosk finished decoding the utterance.
+### Why «Евгениум» uses an internal acoustic surrogate
+
+`Евгениум` is intentionally an invented word. Stock Vosk Russian models may not contain it in their vocabulary. Runtime Vosk grammars silently ignore words that are missing from the model vocabulary, which made the literal strict phrase impossible to decode in EGL 0.5.2/0.5.3.
+
+EGL 0.5.4 keeps **«Евгениум слушай»** and **«Евгениум стоп»** as the user-facing commands, but checks the Vosk vocabulary at startup. If `евгениум` is out-of-vocabulary, EGL maps only that token to the explicit acoustic surrogate `евгений` for the decoder:
+
+```text
+User says / GUI shows:  евгениум слушай
+Vosk decoder expects:   евгений слушай
+
+User says / GUI shows:  евгениум стоп
+Vosk decoder expects:   евгений стоп
+```
+
+This does **not** restore the old broad soft aliases: only a phrase that can be represented by the model through an explicit word-level mapping is put into the grammar, and wake still requires a FINAL high-confidence exact match.
+
+`egl doctor` validates this mapping against the installed Vosk model and prints the actual decoder phrases.
 
 ### STOP
 
@@ -74,7 +89,13 @@ STOP is intentionally aggressive because a false stop is much less harmful than 
 - one STOP is emitted per Voice session;
 - STOP has no shared debounce with wake.
 
-Both thresholds and both canonical phrases are editable in the GUI. Saving settings restarts the EGL daemon so the new Vosk grammar is applied immediately.
+Both thresholds and both user-facing phrases are editable in the GUI. Saving settings restarts the EGL daemon so the new Vosk grammar is applied immediately.
+
+## Microphone sample rates
+
+EGL does not force hardware microphones to 16 kHz. USB/pro-audio interfaces may expose only 44.1/48 kHz through PortAudio.
+
+EGL probes the selected input device, picks an accepted native/common sample rate and passes the actual stream rate to Vosk. The GUI microphone test uses the same device/rate resolver, and `egl doctor` reports the selected device and usable rate.
 
 ## Aggressive browser STOP pipeline
 
@@ -205,7 +226,7 @@ Standard Linux integration files live in their normal locations:
 
 ```bash
 egl gui                 # settings + debugger
-egl doctor              # dependency/autostart/browser diagnostics
+egl doctor              # dependency/autostart/browser/mic/Vosk-grammar diagnostics
 egl status              # idle_ready / idle_loading / listening / ...
 egl wake                # manual start bypassing speech recognition
 egl stop                # aggressive emergency STOP
@@ -222,7 +243,7 @@ ChatGPT Web does not expose EGL with a public `startVoice()` / `stopVoice()` API
 
 Because STOP has destructive navigation/tab-replacement fallbacks, a changed Exit selector should no longer leave a Voice session running indefinitely.
 
-## Reboot / STOP test
+## Reboot / command test
 
 After updating:
 
@@ -232,11 +253,19 @@ egl doctor
 egl status
 ```
 
-Expected flow:
+Expected `doctor` output includes the selected mic rate and representable Vosk command phrases, for example:
+
+```text
+[OK] Selected microphone: Audient iD4 (..., 48000 Hz mono/int16)
+[OK] Wake decoder phrase(s): евгений слушай
+[OK] STOP decoder phrase(s): евгений стоп
+```
+
+Then:
 
 1. open the GUI debugger;
-2. speak ordinary background phrases for a while — partial `wake_match` observations must not trigger Voice;
-3. say **«Евгениум слушай»** clearly — debugger should show a final result above the wake threshold followed by `WAKE_ACCEPTED`;
+2. speak ordinary background phrases for a while — partial wake observations must not trigger Voice;
+3. say **«Евгениум слушай»** clearly — debugger should eventually show the decoder surrogate with a final result above the wake threshold followed by `WAKE_ACCEPTED`;
 4. while Voice is active say **«Евгениум стоп»**;
 5. the orb should disappear immediately;
 6. debugger should show `STOP_DETECTED → STOP_SENT → STOP_CONFIRMED`;
