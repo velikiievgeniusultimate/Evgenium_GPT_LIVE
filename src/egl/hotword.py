@@ -73,38 +73,52 @@ class HotwordListener:
             SetLogLevel(-1)
             model = Model(str(self.model_path))
             grammar = sorted(set(self.wake_aliases + self.stop_aliases + ["[unk]"]))
-            recognizer = KaldiRecognizer(model, 16000, json.dumps(grammar, ensure_ascii=False))
-            audio_q: queue.Queue[bytes] = queue.Queue(maxsize=12)
-
-            def callback(indata, frames, time_info, status):  # type: ignore[no-untyped-def]
-                if status:
-                    LOG.debug("Microphone status: %s", status)
-                try:
-                    audio_q.put_nowait(bytes(indata))
-                except queue.Full:
-                    pass
-
-            with sd.RawInputStream(
-                samplerate=16000,
-                blocksize=4000,
-                dtype="int16",
-                channels=1,
-                device=self.microphone_device,
-                callback=callback,
-            ):
-                LOG.info("Hotword listener ready")
-                while not self._stop.is_set():
-                    try:
-                        chunk = audio_q.get(timeout=0.25)
-                    except queue.Empty:
-                        continue
-                    if recognizer.AcceptWaveform(chunk):
-                        text = json.loads(recognizer.Result()).get("text", "")
-                        if text:
-                            self._dispatch(text)
-                    else:
-                        partial = json.loads(recognizer.PartialResult()).get("partial", "")
-                        if partial:
-                            self._dispatch(partial)
         except Exception:
-            LOG.exception("Hotword listener failed")
+            LOG.exception("Hotword engine initialization failed")
+            return
+
+        retry_delay = 2.0
+        while not self._stop.is_set():
+            try:
+                recognizer = KaldiRecognizer(model, 16000, json.dumps(grammar, ensure_ascii=False))
+                audio_q: queue.Queue[bytes] = queue.Queue(maxsize=12)
+
+                def callback(indata, frames, time_info, status):  # type: ignore[no-untyped-def]
+                    if status:
+                        LOG.debug("Microphone status: %s", status)
+                    try:
+                        audio_q.put_nowait(bytes(indata))
+                    except queue.Full:
+                        pass
+
+                with sd.RawInputStream(
+                    samplerate=16000,
+                    blocksize=4000,
+                    dtype="int16",
+                    channels=1,
+                    device=self.microphone_device,
+                    callback=callback,
+                ):
+                    LOG.info("Hotword listener ready (device=%s)", self.microphone_device)
+                    retry_delay = 2.0
+                    while not self._stop.is_set():
+                        try:
+                            chunk = audio_q.get(timeout=0.25)
+                        except queue.Empty:
+                            continue
+                        if recognizer.AcceptWaveform(chunk):
+                            text = json.loads(recognizer.Result()).get("text", "")
+                            if text:
+                                self._dispatch(text)
+                        else:
+                            partial = json.loads(recognizer.PartialResult()).get("partial", "")
+                            if partial:
+                                self._dispatch(partial)
+            except Exception:
+                LOG.exception(
+                    "Hotword audio stream failed; retrying in %.0f seconds",
+                    retry_delay,
+                )
+                if self._stop.wait(retry_delay):
+                    break
+                retry_delay = min(retry_delay * 2.0, 30.0)
