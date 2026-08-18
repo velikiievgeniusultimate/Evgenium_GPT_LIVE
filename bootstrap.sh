@@ -16,7 +16,8 @@ install_system_deps() {
 
   say "Checking/installing Linux dependencies (sudo may ask for your password)..."
   if command -v pacman >/dev/null 2>&1; then
-    sudo pacman -S --needed --noconfirm git python python-pip portaudio pulseaudio-utils
+    # Arch ships pactl/parec in libpulse (there is no pulseaudio-utils package).
+    sudo pacman -S --needed --noconfirm git python python-pip portaudio libpulse
   elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update
     sudo apt-get install -y git python3 python3-venv python3-pip libportaudio2 pulseaudio-utils
