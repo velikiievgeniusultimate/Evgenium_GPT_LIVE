@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import queue
@@ -14,16 +15,75 @@ from .phrases import normalize_phrase, phrase_matches
 LOG = logging.getLogger(__name__)
 
 DebugCallback = Callable[[dict[str, object]], None]
+StatusCallback = Callable[[str, str, dict[str, object]], None]
+
+# «Евгениум» is intentionally invented and is not expected to be in the stock
+# Russian Vosk vocabulary. We keep it as the user-facing phrase, but map only
+# the OOV token to a close, known acoustic surrogate for the decoder. The rest
+# of the phrase stays exact and wake still requires a FINAL high-confidence
+# result, so this is not fuzzy matching.
+ACOUSTIC_WORD_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "евгениум": ("евгений",),
+}
+
+
+def _model_knows_word(model: object, word: str) -> bool:
+    try:
+        finder = getattr(model, "vosk_model_find_word")
+        return int(finder(word)) >= 0
+    except Exception:
+        return False
+
+
+def resolve_decoder_phrases(model: object, phrases: list[str]) -> list[str]:
+    """Translate user-facing phrases into exact phrases representable by Vosk.
+
+    Known words are preserved verbatim. Unknown words are replaced only through
+    explicit acoustic fallbacks above. If a phrase cannot be represented at all,
+    it is omitted instead of silently degrading to a one-word grammar.
+    """
+    resolved: list[str] = []
+    for raw_phrase in phrases:
+        phrase = normalize_phrase(raw_phrase)
+        words = phrase.split()
+        if not words:
+            continue
+
+        options: list[list[str]] = []
+        representable = True
+        for word in words:
+            if _model_knows_word(model, word):
+                options.append([word])
+                continue
+
+            replacements = [
+                candidate
+                for candidate in ACOUSTIC_WORD_FALLBACKS.get(word, ())
+                if _model_knows_word(model, candidate)
+            ]
+            if not replacements:
+                representable = False
+                break
+            options.append(replacements)
+
+        if not representable:
+            continue
+
+        for combination in itertools.product(*options):
+            candidate = " ".join(combination)
+            if candidate and candidate not in resolved:
+                resolved.append(candidate)
+    return resolved
 
 
 class HotwordListener:
     """Offline Russian wake/stop detector using Vosk.
 
     Wake and stop are intentionally asymmetric:
-    - WAKE is conservative: exact canonical phrase, FINAL result only, and a
+    - WAKE is conservative: exact decoder phrase, FINAL result only, and a
       strong per-word confidence floor.
     - STOP is aggressive: while Voice is active it may fire from a partial
-      result as soon as the complete stop phrase is present.
+      result as soon as the complete decoder stop phrase is present.
     """
 
     def __init__(
@@ -35,6 +95,7 @@ class HotwordListener:
         on_stop: Callable[[], None],
         microphone_device: int | None = None,
         on_debug: DebugCallback | None = None,
+        on_status: StatusCallback | None = None,
         wake_confidence_threshold: float = 0.86,
         stop_confidence_threshold: float = 0.35,
     ) -> None:
@@ -45,14 +106,25 @@ class HotwordListener:
         self.on_stop = on_stop
         self.microphone_device = microphone_device
         self.on_debug = on_debug
+        self.on_status = on_status
         self.wake_confidence_threshold = float(wake_confidence_threshold)
         self.stop_confidence_threshold = float(stop_confidence_threshold)
+        self.decoder_wake_aliases = [normalize_phrase(x) for x in wake_aliases if normalize_phrase(x)]
+        self.decoder_stop_aliases = [normalize_phrase(x) for x in stop_aliases if normalize_phrase(x)]
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._active = threading.Event()
         self._last_wake_trigger = 0.0
         self._stop_fired_for_session = False
         self._last_debug_key: tuple[object, ...] | None = None
+
+    def _emit_status(self, event: str, detail: str = "", **data: object) -> None:
+        if self.on_status is None:
+            return
+        try:
+            self.on_status(event, detail, dict(data))
+        except Exception:
+            LOG.debug("Hotword status callback failed", exc_info=True)
 
     def set_voice_active(self, active: bool) -> None:
         if active:
@@ -67,6 +139,9 @@ class HotwordListener:
             return
         self._thread = threading.Thread(target=self._run, name="egl-hotword", daemon=True)
         self._thread.start()
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     def close(self) -> None:
         self._stop.set()
@@ -129,6 +204,8 @@ class HotwordListener:
                     "reason": reason,
                     "wake_threshold": self.wake_confidence_threshold,
                     "stop_threshold": self.stop_confidence_threshold,
+                    "decoder_wake_aliases": self.decoder_wake_aliases,
+                    "decoder_stop_aliases": self.decoder_stop_aliases,
                 }
             )
         except Exception:
@@ -144,9 +221,8 @@ class HotwordListener:
         normalized = normalize_phrase(text)
         active = self._active.is_set()
 
-        canonical_wake = normalize_phrase(self.wake_aliases[0]) if self.wake_aliases else ""
-        wake_match = bool(canonical_wake and normalized == canonical_wake)
-        stop_match = phrase_matches(normalized, self.stop_aliases)
+        wake_match = normalized in self.decoder_wake_aliases
+        stop_match = phrase_matches(normalized, self.decoder_stop_aliases)
 
         accepted: str | None = None
         reason = "no_match"
@@ -196,18 +272,36 @@ class HotwordListener:
 
             SetLogLevel(-1)
             model = Model(str(self.model_path))
-            grammar = sorted(set(self.wake_aliases + self.stop_aliases + ["[unk]"]))
-        except Exception:
+            self.decoder_wake_aliases = resolve_decoder_phrases(model, self.wake_aliases)
+            self.decoder_stop_aliases = resolve_decoder_phrases(model, self.stop_aliases)
+            if not self.decoder_wake_aliases:
+                raise RuntimeError(
+                    f"Wake phrase is not representable by the Vosk vocabulary: {self.wake_aliases!r}"
+                )
+            if not self.decoder_stop_aliases:
+                raise RuntimeError(
+                    f"STOP phrase is not representable by the Vosk vocabulary: {self.stop_aliases!r}"
+                )
+
+            grammar = sorted(
+                set(self.decoder_wake_aliases + self.decoder_stop_aliases + ["[unk]"])
+            )
+            self._emit_status(
+                "HOTWORD_GRAMMAR",
+                "Vosk decoder grammar prepared",
+                user_wake=self.wake_aliases,
+                user_stop=self.stop_aliases,
+                decoder_wake=self.decoder_wake_aliases,
+                decoder_stop=self.decoder_stop_aliases,
+            )
+        except Exception as exc:
             LOG.exception("Hotword engine initialization failed")
+            self._emit_status("HOTWORD_FATAL", str(exc))
             return
 
         retry_delay = 2.0
         while not self._stop.is_set():
             try:
-                # Do not force USB/pro-audio devices to 16 kHz. PortAudio may
-                # expose only 44.1/48 kHz for devices such as Audient iD4.
-                # KaldiRecognizer receives the actual input rate and handles it
-                # as the source sampling frequency.
                 sample_rate = resolve_input_sample_rate(sd, self.microphone_device)
                 blocksize = max(320, int(round(sample_rate * 0.10)))
 
@@ -241,11 +335,21 @@ class HotwordListener:
                     callback=callback,
                 ):
                     LOG.info(
-                        "Hotword listener ready (device=%s, sample_rate=%d Hz, wake>=%.2f final-only, stop>=%.2f partial-ok)",
+                        "Hotword listener ready (device=%s, sample_rate=%d Hz, wake=%s, stop=%s, wake>=%.2f final-only, stop>=%.2f partial-ok)",
                         self.microphone_device,
                         sample_rate,
+                        self.decoder_wake_aliases,
+                        self.decoder_stop_aliases,
                         self.wake_confidence_threshold,
                         self.stop_confidence_threshold,
+                    )
+                    self._emit_status(
+                        "HOTWORD_READY",
+                        "background microphone listener is active",
+                        device=self.microphone_device,
+                        sample_rate=sample_rate,
+                        decoder_wake=self.decoder_wake_aliases,
+                        decoder_stop=self.decoder_stop_aliases,
                     )
                     retry_delay = 2.0
                     while not self._stop.is_set():
@@ -272,10 +376,16 @@ class HotwordListener:
                                     final=False,
                                     confidence=self._confidence(payload, final=False),
                                 )
-            except Exception:
+            except Exception as exc:
                 LOG.exception(
                     "Hotword audio stream failed; retrying in %.0f seconds",
                     retry_delay,
+                )
+                self._emit_status(
+                    "HOTWORD_ERROR",
+                    str(exc),
+                    retry_in_seconds=retry_delay,
+                    device=self.microphone_device,
                 )
                 if self._stop.wait(retry_delay):
                     break
