@@ -45,7 +45,7 @@ jobs:
         run: python -m compileall -q src tests
 
   chromium-cdp-smoke:
-    name: System Chromium CDP smoke
+    name: Permanent hidden Chromium/Xvfb smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,8 +53,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - name: Install EGL
+      - name: Install Xvfb and EGL
         run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
           python -m pip install -e .
       - name: Locate system Chrome
@@ -63,26 +65,29 @@ jobs:
           test -n "$BROWSER"
           echo "EGL_BROWSER=$BROWSER" >> "$GITHUB_ENV"
           echo "Using $BROWSER"
-      - name: Launch normal browser and attach through CDP
+      - name: Launch Chromium on EGL private Xvfb and attach through CDP
         run: |
-          xvfb-run -a python - <<'PY'
+          python - <<'PY'
           import os
           import tempfile
           from pathlib import Path
-          from egl.browser import ChatGPTBrowser, find_system_browser
+          from egl.browser import ChatGPTBrowser, find_system_browser, find_xvfb
 
           assert find_system_browser(), os.environ.get("EGL_BROWSER")
+          assert find_xvfb()
           with tempfile.TemporaryDirectory() as td:
               browser = ChatGPTBrowser(
                   Path(td) / "profile",
-                  "data:text/html,<title>EGL CDP smoke</title><h1>ok</h1>",
-                  headless=False,
+                  "data:text/html,<title>EGL hidden smoke</title><h1>ok</h1>",
+                  headless=True,
+                  virtual_display=True,
               )
               browser.open()
               try:
                   assert browser.page is not None
-                  assert browser.page.title() == "EGL CDP smoke"
+                  assert browser.page.title() == "EGL hidden smoke"
+                  assert browser.is_running()
               finally:
                   browser.close()
-          print("system Chromium CDP smoke OK")
+          print("permanent hidden Chromium/Xvfb smoke OK")
           PY
