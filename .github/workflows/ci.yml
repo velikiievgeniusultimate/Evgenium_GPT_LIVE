@@ -39,8 +39,8 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q src tests
 
-  chromium-smoke:
-    name: Playwright Chromium smoke
+  chromium-cdp-smoke:
+    name: System Chromium CDP smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,26 +48,36 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - name: Install EGL and Chromium
+      - name: Install EGL
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
-          python -m playwright install --with-deps chromium
-      - name: Launch persistent Chromium
+      - name: Locate system Chrome
         run: |
-          python - <<'PY'
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          test -n "$BROWSER"
+          echo "EGL_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+          echo "Using $BROWSER"
+      - name: Launch normal browser and attach through CDP
+        run: |
+          xvfb-run -a python - <<'PY'
+          import os
           import tempfile
           from pathlib import Path
-          from playwright.sync_api import sync_playwright
+          from egl.browser import ChatGPTBrowser, find_system_browser
 
-          with tempfile.TemporaryDirectory() as td, sync_playwright() as p:
-              browser = p.chromium.launch_persistent_context(
-                  user_data_dir=str(Path(td) / "profile"),
-                  headless=True,
+          assert find_system_browser(), os.environ.get("EGL_BROWSER")
+          with tempfile.TemporaryDirectory() as td:
+              browser = ChatGPTBrowser(
+                  Path(td) / "profile",
+                  "data:text/html,<title>EGL CDP smoke</title><h1>ok</h1>",
+                  headless=False,
               )
-              page = browser.pages[0] if browser.pages else browser.new_page()
-              page.goto("data:text/html,<title>EGL smoke</title><h1>ok</h1>")
-              assert page.title() == "EGL smoke"
-              browser.close()
-          print("Chromium persistent-context smoke OK")
+              browser.open()
+              try:
+                  assert browser.page is not None
+                  assert browser.page.title() == "EGL CDP smoke"
+              finally:
+                  browser.close()
+          print("system Chromium CDP smoke OK")
           PY
