@@ -49,13 +49,7 @@ class BrowserAutomationError(RuntimeError):
 
 
 def find_system_browser() -> Path | None:
-    """Find a normal Chromium-family browser installed by the user/OS.
-
-    EGL deliberately does not use Playwright's bundled Chrome for first-time
-    authentication. Cloudflare can treat test/automation browsers differently,
-    while a normal system browser with a dedicated clean profile behaves much
-    closer to an ordinary user session.
-    """
+    """Find a normal Chromium-family browser installed by the user/OS."""
     override = os.environ.get("EGL_BROWSER", "").strip()
     if override:
         path = Path(override).expanduser()
@@ -78,17 +72,17 @@ def _free_local_port() -> int:
 
 
 class ChatGPTBrowser:
-    """Drive a normal Chromium-family browser through its DevTools endpoint.
+    """Drive a normal Chromium-family browser through DevTools/CDP.
 
-    Important: the browser process itself is launched directly, not by
-    Playwright. Playwright only attaches after launch via CDP. This lets the
-    first login/Cloudflare challenge happen in a normal browser while still
-    giving EGL reliable DOM controls afterwards.
+    The browser process is launched directly, not by Playwright. During first
+    setup EGL can deliberately delay Playwright attachment until *after* the
+    user has completed Cloudflare/login and opened the desired chat. Runtime
+    sessions attach immediately because the dedicated profile is already
+    authenticated.
 
     The historical `headless` argument is preserved for config compatibility.
-    EGL no longer uses true headless mode: when `headless=True`, the normal
-    browser starts minimized so audio/WebRTC and login state behave like a
-    desktop browser.
+    EGL no longer uses true headless mode: when true, the normal browser starts
+    minimized so WebRTC/audio behave like a desktop browser.
     """
 
     def __init__(self, profile: Path, chat_url: str, headless: bool = True) -> None:
@@ -102,8 +96,15 @@ class ChatGPTBrowser:
         self.context = None
         self.page = None
 
-    def open(self) -> None:
-        from playwright.sync_api import sync_playwright
+    def _endpoint(self) -> str:
+        if self._debug_port is None:
+            raise BrowserAutomationError("Browser DevTools port is not initialized")
+        return f"http://127.0.0.1:{self._debug_port}"
+
+    def launch_only(self) -> None:
+        """Launch a normal browser and wait for DevTools, without automation."""
+        if self._browser_process and self._browser_process.poll() is None:
+            return
 
         executable = find_system_browser()
         if executable is None:
@@ -128,8 +129,6 @@ class ChatGPTBrowser:
             "--disable-renderer-backgrounding",
         ]
         if self.background:
-            # Keep a real headed browser for WebRTC/audio, but do not place a
-            # browser window in the user's way during normal daemon operation.
             args.append("--start-minimized")
         args.append(target)
 
@@ -141,7 +140,7 @@ class ChatGPTBrowser:
             start_new_session=True,
         )
 
-        endpoint = f"http://127.0.0.1:{self._debug_port}"
+        endpoint = self._endpoint()
         deadline = time.monotonic() + 20.0
         last_error: Exception | None = None
         while time.monotonic() < deadline:
@@ -152,18 +151,27 @@ class ChatGPTBrowser:
             try:
                 with urllib.request.urlopen(f"{endpoint}/json/version", timeout=0.5) as response:
                     if response.status == 200:
-                        break
+                        return
             except Exception as exc:
                 last_error = exc
                 time.sleep(0.15)
-        else:
-            self.close()
-            raise BrowserAutomationError(
-                f"Could not connect to the system browser DevTools endpoint: {last_error}"
-            )
+
+        self.close()
+        raise BrowserAutomationError(
+            f"Could not connect to the system browser DevTools endpoint: {last_error}"
+        )
+
+    def attach(self) -> None:
+        """Attach Playwright to an already-running normal browser via CDP."""
+        from playwright.sync_api import sync_playwright
+
+        if self._browser is not None:
+            return
+        if not self._browser_process or self._browser_process.poll() is not None:
+            raise BrowserAutomationError("System browser is not running")
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.connect_over_cdp(endpoint)
+        self._browser = self._pw.chromium.connect_over_cdp(self._endpoint())
         contexts = self._browser.contexts
         if not contexts:
             self.close()
@@ -176,15 +184,19 @@ class ChatGPTBrowser:
             LOG.warning("Could not pre-grant microphone permission", exc_info=True)
 
         pages = self.context.pages
-        self.page = pages[0] if pages else self.context.new_page()
-        # A browser may restore an old tab before opening our requested target.
-        # Navigate explicitly so setup/runtime are deterministic.
-        if not self.page.url.startswith(target):
-            self.page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+        self.page = pages[-1] if pages else self.context.new_page()
+
+        # Runtime should always land on the remembered chat. During setup
+        # chat_url is empty, so we intentionally leave the page exactly where
+        # the human user navigated before attachment.
+        if self.chat_url and not self.page.url.startswith(self.chat_url):
+            self.page.goto(self.chat_url, wait_until="domcontentloaded", timeout=60_000)
+
+    def open(self) -> None:
+        self.launch_only()
+        self.attach()
 
     def close(self) -> None:
-        # Closing the CDP-connected Browser asks Chromium to terminate cleanly,
-        # which flushes cookies/local storage in EGL's dedicated profile.
         if self._browser:
             try:
                 self._browser.close()
@@ -259,7 +271,6 @@ class ChatGPTBrowser:
         if self._click_first(VOICE_EXIT_SELECTORS, timeout_ms=500):
             time.sleep(0.4)
             return
-        # Hard fallback: navigation tears down the active WebRTC voice view.
         if self.chat_url:
             self.page.goto(self.chat_url, wait_until="domcontentloaded", timeout=60_000)
         else:
