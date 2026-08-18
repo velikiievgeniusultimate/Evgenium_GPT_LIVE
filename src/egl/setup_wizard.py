@@ -43,16 +43,19 @@ def run_setup(install_autostart: bool = True) -> int:
     browser_exe = find_system_browser()
     print("\nOpening a NORMAL system Chromium-family browser with EGL's dedicated profile.")
     print(f"Browser: {browser_exe or 'not found'}")
-    print("This browser is launched directly; Playwright attaches only afterwards via DevTools.")
+    print("During login EGL does NOT attach Playwright or automate the page.")
     print("1. Complete any Cloudflare/human verification normally.")
     print("2. Sign in to ChatGPT if needed.")
     print("3. Open the chat that EGL should always use.")
     print("4. Return here and press ENTER.")
 
     browser = ChatGPTBrowser(Path(cfg.browser_profile_path), "", headless=False)
-    browser.open()
+    browser.launch_only()
     try:
         input("\nPress ENTER after the desired chat is open... ")
+        # Only now, after the human login flow is complete, attach via CDP so
+        # EGL can read the chosen URL and later control Voice buttons.
+        browser.attach()
         assert browser.page is not None
         url = browser.page.url
         if not ChatGPTBrowser.is_chat_url(url):
