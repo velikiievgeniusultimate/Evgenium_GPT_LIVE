@@ -11,23 +11,25 @@ DEFAULT_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.2
 DEFAULT_MODEL_DIRNAME = "vosk-model-small-ru-0.22"
 
 
-def _xdg(env_name: str, fallback: str) -> Path:
-    raw = os.environ.get(env_name)
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / fallback
+def app_home() -> Path:
+    """Return EGL's main home directory.
+
+    EGL intentionally keeps almost all persistent project/runtime data in one
+    visible directory so installation, backup and removal are predictable.
+    """
+    return Path(os.environ.get("EGL_HOME", str(Path.home() / "Evgenium_GPT"))).expanduser()
 
 
 def config_dir() -> Path:
-    return _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
+    return app_home() / "config"
 
 
 def data_dir() -> Path:
-    return _xdg("XDG_DATA_HOME", ".local/share") / APP_NAME
+    return app_home() / "data"
 
 
 def state_dir() -> Path:
-    return _xdg("XDG_STATE_HOME", ".local/state") / APP_NAME
+    return app_home() / "state"
 
 
 def runtime_dir() -> Path:
