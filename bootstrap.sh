@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
-EGL_REF="${EGL_REF:-agent/egl-linux-mvp}"
+EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
 
 say() { printf '\033[1;36m[EGL]\033[0m %s\n' "$*"; }
