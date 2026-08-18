@@ -57,7 +57,10 @@ class EGLConfig:
     vosk_model_url: str = DEFAULT_MODEL_URL
     vosk_model_path: str = ""
     browser_profile_path: str = ""
+    # Historical name retained for compatibility. True now means "background
+    # browser": normal headed Chromium, minimized/hidden from Plasma surfaces.
     browser_headless: bool = True
+    browser_keep_alive: bool = True
     microphone_device: int | None = None
     indicator_enabled: bool = True
     indicator_size: int = 74
