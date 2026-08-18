@@ -196,8 +196,12 @@ class ChatGPTBrowser:
             "--autoplay-policy=no-user-gesture-required",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
-            "--class=EvgeniumGPT",
         ]
+        # Only service/runtime windows get the EGL class. The visible setup
+        # browser must remain a normal Chromium window so the old KWin guard
+        # cannot hide it while the user is logging in.
+        if self.virtual_display or self.background:
+            args.append("--class=EvgeniumGPT")
 
         if self.virtual_display:
             self._start_virtual_display()
@@ -206,7 +210,6 @@ class ChatGPTBrowser:
             env.pop("WAYLAND_DISPLAY", None)
             args.append("--ozone-platform=x11")
         elif self.background:
-            # Visible-desktop fallback only. Normal runtime should use Xvfb.
             args.append("--start-minimized")
 
         args.append(target)
@@ -247,7 +250,6 @@ class ChatGPTBrowser:
         )
 
     def attach(self, *, navigate: bool = True, tolerate_navigation_failure: bool = False) -> None:
-        """Attach Playwright to an already-running normal browser via CDP."""
         from playwright.sync_api import sync_playwright
 
         if self._browser is not None:
@@ -289,18 +291,11 @@ class ChatGPTBrowser:
         self.attach()
 
     def open_runtime(self) -> bool:
-        """Start the permanent hidden runtime browser even if VPN/network is down.
-
-        Browser/Xvfb/CDP startup is local and must succeed independently of
-        ChatGPT. The return value only tells the daemon whether the Voice button
-        is already ready.
-        """
         self.launch_only()
         self.attach(navigate=True, tolerate_navigation_failure=True)
         return self.ensure_chat_ready(timeout_ms=4_000, reload=False)
 
     def ensure_chat_ready(self, *, timeout_ms: int = 8_000, reload: bool = False) -> bool:
-        """Keep the remembered chat loaded and wait until its Voice button exists."""
         if self.page is None:
             return False
 
@@ -401,9 +396,6 @@ class ChatGPTBrowser:
         if self.page is None:
             raise BrowserAutomationError("ChatGPT page is not attached")
 
-        # Normally this is immediate because the daemon preloads the page. Keep
-        # a generous readiness wait so a background refresh can never race the
-        # wake phrase again.
         if not self.ensure_chat_ready(timeout_ms=5_000, reload=False):
             if not self.ensure_chat_ready(timeout_ms=15_000, reload=True):
                 labels = self._button_labels()
@@ -423,7 +415,6 @@ class ChatGPTBrowser:
             time.sleep(0.4)
             return
 
-        # Keep the permanent tab alive even if the Exit selector changes.
         if self.chat_url:
             try:
                 self.page.goto(
