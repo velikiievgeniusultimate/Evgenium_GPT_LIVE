@@ -17,7 +17,7 @@ class ConfigTests(unittest.TestCase):
                 import egl.config as c
 
                 cfg = c.EGLConfig.default()
-                self.assertEqual(Path(cfg.browser_profile_path), egl_home / "data" / "browser-profile")
+                self.assertEqual(Path(cfg.browser_profile_path), egl_home / "data" / "browser-profile-system")
                 self.assertTrue(Path(cfg.vosk_model_path).is_relative_to(egl_home))
 
                 cfg.chat_url = "https://chatgpt.com/c/test"
