@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -34,6 +35,7 @@ from .control import send_command
 from .integration import install_integrations
 from .microphone import input_device_label, resolve_input_sample_rate
 from .state import debug_screenshot_path, read_debug_events, read_state
+from .volume import set_assistant_volume
 
 
 class DebugWindow(QDialog):
@@ -202,11 +204,16 @@ class SettingsWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Evgenium GPT LIVE — EGL")
-        self.resize(740, 720)
+        self.resize(740, 790)
         self.cfg = load_config()
         self._mic_stream = None
         self._mic_level = 0.0
         self._debug_window: DebugWindow | None = None
+
+        self._volume_apply_timer = QTimer(self)
+        self._volume_apply_timer.setSingleShot(True)
+        self._volume_apply_timer.setInterval(180)
+        self._volume_apply_timer.timeout.connect(self._apply_volume_live)
 
         root = QWidget(self)
         layout = QVBoxLayout(root)
@@ -259,6 +266,33 @@ class SettingsWindow(QMainWindow):
         test_row.addWidget(self.level, 1)
         audio_layout.addLayout(test_row)
         layout.addWidget(audio_group)
+
+        volume_group = QGroupBox("Громкость голосового помощника")
+        volume_layout = QVBoxLayout(volume_group)
+        volume_row = QHBoxLayout()
+        self.assistant_volume = QSlider(Qt.Orientation.Horizontal)
+        self.assistant_volume.setRange(0, 150)
+        self.assistant_volume.setSingleStep(5)
+        self.assistant_volume.setPageStep(10)
+        self.assistant_volume.setValue(self.cfg.assistant_volume_percent)
+        self.assistant_volume_value = QLabel()
+        self.assistant_volume_value.setMinimumWidth(54)
+        self.assistant_volume_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        volume_row.addWidget(self.assistant_volume, 1)
+        volume_row.addWidget(self.assistant_volume_value)
+        volume_layout.addLayout(volume_row)
+        self.volume_status = QLabel()
+        self.volume_status.setWordWrap(True)
+        volume_layout.addWidget(self.volume_status)
+        volume_hint = QLabel(
+            "100% — обычная громкость. 101–150% — программное усиление только потока EGL; "
+            "на высоких значениях возможны искажения."
+        )
+        volume_hint.setWordWrap(True)
+        volume_layout.addWidget(volume_hint)
+        layout.addWidget(volume_group)
+        self.assistant_volume.valueChanged.connect(self._volume_changed)
+        self._volume_changed(self.assistant_volume.value(), apply=False)
 
         recognition_group = QGroupBox("Распознавание команд")
         recognition_form = QFormLayout(recognition_group)
@@ -405,6 +439,27 @@ class SettingsWindow(QMainWindow):
         self.level.setValue(0)
         self.test_button.setText("Проверить микрофон")
 
+    def _volume_changed(self, value: int, *, apply: bool = True) -> None:
+        self.assistant_volume_value.setText(f"{int(value)}%")
+        if int(value) > 100:
+            self.volume_status.setText("Усиление выше системных 100% включено.")
+        else:
+            self.volume_status.setText("Регулируется только звук голосового помощника EGL.")
+        if apply:
+            self._volume_apply_timer.start()
+
+    def _apply_volume_live(self) -> None:
+        value = self.assistant_volume.value()
+        changed = set_assistant_volume(value)
+        if changed:
+            self.volume_status.setText(
+                f"Применено сейчас: {value}% к {changed} аудиопотоку(ам) EGL."
+            )
+        else:
+            self.volume_status.setText(
+                f"{value}% сохранится для Voice; активный аудиопоток EGL сейчас не найден."
+            )
+
     def _command(self, command: str) -> None:
         try:
             send_command(command)
@@ -449,6 +504,7 @@ class SettingsWindow(QMainWindow):
         self.cfg.stop_aliases = [stop_phrase]
         self.cfg.wake_confidence_threshold = self.wake_threshold.value() / 100.0
         self.cfg.stop_confidence_threshold = self.stop_threshold.value() / 100.0
+        self.cfg.assistant_volume_percent = self.assistant_volume.value()
         self.cfg.browser_headless = True
         self.cfg.browser_keep_alive = True
         self.cfg.indicator_enabled = self.indicator_enabled.isChecked()
