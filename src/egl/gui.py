@@ -60,7 +60,7 @@ class DebugWindow(QDialog):
         stop = QPushButton("STOP")
         stop.clicked.connect(lambda: self._command("stop"))
         snapshot = QPushButton("Снимок сейчас")
-        snapshot.clicked.connect(self._request_snapshot)
+        snapshot.clicked.connect(lambda: self._request_snapshot(quiet=False))
         reload_page = QPushButton("Reload ChatGPT")
         reload_page.clicked.connect(lambda: self._command("browser_reload"))
         self.live_preview = QCheckBox("Живое превью")
@@ -90,7 +90,7 @@ class DebugWindow(QDialog):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(700)
-        self._request_snapshot()
+        self._request_snapshot(quiet=True)
         self._refresh()
 
     def _command(self, command: str) -> None:
@@ -99,9 +99,9 @@ class DebugWindow(QDialog):
         except OSError as exc:
             QMessageBox.warning(self, "EGL debug", f"Daemon не отвечает:\n{exc}")
 
-    def _request_snapshot(self) -> None:
+    def _request_snapshot(self, *, quiet: bool) -> None:
         self._last_snapshot_request = time.monotonic()
-        self._command("debug_snapshot")
+        self._command("debug_snapshot_quiet" if quiet else "debug_snapshot")
 
     @staticmethod
     def _format_event(item: dict) -> str:
@@ -165,7 +165,7 @@ class DebugWindow(QDialog):
                 )
 
         if self.live_preview.isChecked() and time.monotonic() - self._last_snapshot_request >= 1.2:
-            self._request_snapshot()
+            self._request_snapshot(quiet=True)
 
 
 class SettingsWindow(QMainWindow):
