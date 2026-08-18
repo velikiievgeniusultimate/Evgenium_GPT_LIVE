@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from .browser import ChatGPTBrowser
+from .browser import ChatGPTBrowser, find_system_browser
 from .config import ensure_dirs, load_config, save_config
 from .model import ensure_vosk_model
 from .service import install_service
@@ -19,8 +19,6 @@ def list_microphones() -> None:
 
 
 def run_setup(install_autostart: bool = True) -> int:
-    # load_config() returns defaults when config.json does not exist and preserves
-    # an existing configuration when setup is intentionally re-run.
     cfg = load_config()
     ensure_dirs()
     print("\nEGL — Evgenium GPT LIVE setup")
@@ -42,10 +40,14 @@ def run_setup(install_autostart: bool = True) -> int:
 
     ensure_vosk_model(cfg.vosk_model_url, Path(cfg.vosk_model_path))
 
-    print("\nOpening a dedicated Chromium profile for ChatGPT.")
-    print("1. Sign in to ChatGPT if needed.")
-    print("2. Open the chat that EGL should always use.")
-    print("3. Return here and press ENTER.")
+    browser_exe = find_system_browser()
+    print("\nOpening a NORMAL system Chromium-family browser with EGL's dedicated profile.")
+    print(f"Browser: {browser_exe or 'not found'}")
+    print("This browser is launched directly; Playwright attaches only afterwards via DevTools.")
+    print("1. Complete any Cloudflare/human verification normally.")
+    print("2. Sign in to ChatGPT if needed.")
+    print("3. Open the chat that EGL should always use.")
+    print("4. Return here and press ENTER.")
 
     browser = ChatGPTBrowser(Path(cfg.browser_profile_path), "", headless=False)
     browser.open()
