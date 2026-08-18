@@ -19,14 +19,19 @@ class ConfigTests(unittest.TestCase):
                 cfg = c.EGLConfig.default()
                 self.assertEqual(Path(cfg.browser_profile_path), egl_home / "data" / "browser-profile-system")
                 self.assertTrue(Path(cfg.vosk_model_path).is_relative_to(egl_home))
+                self.assertTrue(cfg.browser_headless)
+                self.assertTrue(cfg.browser_keep_alive)
 
                 cfg.chat_url = "https://chatgpt.com/c/test"
+                cfg.microphone_device = 7
                 path = c.save_config(cfg)
                 self.assertEqual(path, egl_home / "config" / "config.json")
 
                 loaded = c.load_config()
                 self.assertEqual(loaded.chat_url, cfg.chat_url)
                 self.assertEqual(loaded.wake_phrase, "евгениум слушай")
+                self.assertEqual(loaded.microphone_device, 7)
+                self.assertTrue(loaded.browser_keep_alive)
             finally:
                 if old_home is None:
                     os.environ.pop("EGL_HOME", None)
