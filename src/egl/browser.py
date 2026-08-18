@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
+import socket
+import subprocess
 import time
+import urllib.request
 from pathlib import Path
 
 LOG = logging.getLogger(__name__)
@@ -27,55 +32,185 @@ VOICE_EXIT_SELECTORS = [
     'button[aria-label*="выйти" i]',
 ]
 
+SYSTEM_BROWSER_CANDIDATES = (
+    "chromium",
+    "chromium-browser",
+    "google-chrome-stable",
+    "google-chrome",
+    "brave-browser",
+    "brave",
+    "vivaldi-stable",
+    "vivaldi",
+)
+
 
 class BrowserAutomationError(RuntimeError):
     pass
 
 
+def find_system_browser() -> Path | None:
+    """Find a normal Chromium-family browser installed by the user/OS.
+
+    EGL deliberately does not use Playwright's bundled Chrome for first-time
+    authentication. Cloudflare can treat test/automation browsers differently,
+    while a normal system browser with a dedicated clean profile behaves much
+    closer to an ordinary user session.
+    """
+    override = os.environ.get("EGL_BROWSER", "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if path.is_file():
+            return path
+        resolved = shutil.which(override)
+        return Path(resolved) if resolved else None
+
+    for name in SYSTEM_BROWSER_CANDIDATES:
+        resolved = shutil.which(name)
+        if resolved:
+            return Path(resolved)
+    return None
+
+
+def _free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 class ChatGPTBrowser:
+    """Drive a normal Chromium-family browser through its DevTools endpoint.
+
+    Important: the browser process itself is launched directly, not by
+    Playwright. Playwright only attaches after launch via CDP. This lets the
+    first login/Cloudflare challenge happen in a normal browser while still
+    giving EGL reliable DOM controls afterwards.
+
+    The historical `headless` argument is preserved for config compatibility.
+    EGL no longer uses true headless mode: when `headless=True`, the normal
+    browser starts minimized so audio/WebRTC and login state behave like a
+    desktop browser.
+    """
+
     def __init__(self, profile: Path, chat_url: str, headless: bool = True) -> None:
         self.profile = profile
         self.chat_url = chat_url
-        self.headless = headless
+        self.background = headless
         self._pw = None
+        self._browser = None
+        self._browser_process: subprocess.Popen[bytes] | None = None
+        self._debug_port: int | None = None
         self.context = None
         self.page = None
 
     def open(self) -> None:
         from playwright.sync_api import sync_playwright
 
+        executable = find_system_browser()
+        if executable is None:
+            raise BrowserAutomationError(
+                "No normal Chromium-family browser was found. Install Chromium/Chrome "
+                "or set EGL_BROWSER=/path/to/browser. On Arch: sudo pacman -S chromium"
+            )
+
         self.profile.mkdir(parents=True, exist_ok=True)
-        self._pw = sync_playwright().start()
-        self.context = self._pw.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile),
-            headless=self.headless,
-            channel="chromium",
-            ignore_default_args=["--mute-audio"],
-            args=[
-                "--autoplay-policy=no-user-gesture-required",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-            ],
-            no_viewport=True,
+        self._debug_port = _free_local_port()
+        target = self.chat_url or CHATGPT_ORIGIN
+
+        args = [
+            str(executable),
+            f"--user-data-dir={self.profile}",
+            f"--remote-debugging-port={self._debug_port}",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+        ]
+        if self.background:
+            # Keep a real headed browser for WebRTC/audio, but do not place a
+            # browser window in the user's way during normal daemon operation.
+            args.append("--start-minimized")
+        args.append(target)
+
+        LOG.info("Launching system browser for EGL: %s", executable)
+        self._browser_process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
+
+        endpoint = f"http://127.0.0.1:{self._debug_port}"
+        deadline = time.monotonic() + 20.0
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            if self._browser_process.poll() is not None:
+                raise BrowserAutomationError(
+                    f"System browser exited before DevTools became ready: {executable}"
+                )
+            try:
+                with urllib.request.urlopen(f"{endpoint}/json/version", timeout=0.5) as response:
+                    if response.status == 200:
+                        break
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.15)
+        else:
+            self.close()
+            raise BrowserAutomationError(
+                f"Could not connect to the system browser DevTools endpoint: {last_error}"
+            )
+
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.connect_over_cdp(endpoint)
+        contexts = self._browser.contexts
+        if not contexts:
+            self.close()
+            raise BrowserAutomationError("Connected browser did not expose a default context")
+        self.context = contexts[0]
+
         try:
             self.context.grant_permissions(["microphone"], origin=CHATGPT_ORIGIN)
         except Exception:
             LOG.warning("Could not pre-grant microphone permission", exc_info=True)
-        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
-        if self.chat_url:
-            self.page.goto(self.chat_url, wait_until="domcontentloaded", timeout=60_000)
-        else:
-            self.page.goto(CHATGPT_ORIGIN, wait_until="domcontentloaded", timeout=60_000)
+
+        pages = self.context.pages
+        self.page = pages[0] if pages else self.context.new_page()
+        # A browser may restore an old tab before opening our requested target.
+        # Navigate explicitly so setup/runtime are deterministic.
+        if not self.page.url.startswith(target):
+            self.page.goto(target, wait_until="domcontentloaded", timeout=60_000)
 
     def close(self) -> None:
-        if self.context:
-            self.context.close()
+        # Closing the CDP-connected Browser asks Chromium to terminate cleanly,
+        # which flushes cookies/local storage in EGL's dedicated profile.
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                LOG.debug("Could not close CDP browser cleanly", exc_info=True)
         if self._pw:
-            self._pw.stop()
+            try:
+                self._pw.stop()
+            except Exception:
+                LOG.debug("Could not stop Playwright cleanly", exc_info=True)
+        if self._browser_process and self._browser_process.poll() is None:
+            try:
+                self._browser_process.terminate()
+                self._browser_process.wait(timeout=3)
+            except Exception:
+                try:
+                    self._browser_process.kill()
+                except Exception:
+                    pass
+
         self.context = None
         self.page = None
+        self._browser = None
         self._pw = None
+        self._browser_process = None
+        self._debug_port = None
 
     def __enter__(self) -> "ChatGPTBrowser":
         self.open()
