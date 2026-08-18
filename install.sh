@@ -71,7 +71,9 @@ PY
 then
   say "Existing ChatGPT configuration detected; skipping interactive setup."
   "$VENV/bin/egl" service install
-  say "Update complete. Open 'Evgenium GPT LIVE' from the application menu or run: egl gui"
+  systemctl --user restart egl.service
+  say "Update complete. EGL daemon restarted with the new code."
+  say "Open 'Evgenium GPT LIVE' from the application menu or run: egl gui"
   exit 0
 fi
 
