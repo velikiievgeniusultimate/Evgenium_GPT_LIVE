@@ -8,7 +8,28 @@ BIN_DIR="$HOME/.local/bin"
 CONFIG_FILE="$EGL_HOME/config/config.json"
 
 say() { printf '\033[1;36m[EGL]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[EGL WARN]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[EGL ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+
+service_diagnostics() {
+  echo >&2
+  warn "egl.service did not become active. Current status:"
+  systemctl --user --no-pager --full status egl.service >&2 || true
+  echo >&2
+  warn "Recent egl.service log:"
+  journalctl --user -u egl.service --no-pager -n 80 >&2 || true
+}
+
+verify_service_started() {
+  # systemctl restart can return before a crashing service has actually failed.
+  # Give the daemon a moment to initialize its local listener/browser stack and
+  # then fail the installer with useful diagnostics if it is not still active.
+  sleep 1.2
+  if ! systemctl --user is-active --quiet egl.service; then
+    service_diagnostics
+    die "egl.service failed after restart. The diagnostics above show the real daemon error."
+  fi
+}
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 mkdir -p "$EGL_HOME" "$BIN_DIR"
@@ -71,8 +92,16 @@ PY
 then
   say "Existing ChatGPT configuration detected; skipping interactive setup."
   "$VENV/bin/egl" service install
-  systemctl --user restart egl.service
-  say "Update complete. EGL daemon restarted with the new code."
+  # service install already resets failed/start-limit state before restarting.
+  # Do it once more here defensively for old unit/install states, then verify
+  # the daemon survives initialization instead of reporting a false success.
+  systemctl --user reset-failed egl.service || true
+  if ! systemctl --user restart egl.service; then
+    service_diagnostics
+    die "Could not restart egl.service."
+  fi
+  verify_service_started
+  say "Update complete. EGL daemon restarted and is active with the new code."
   say "Open 'Evgenium GPT LIVE' from the application menu or run: egl gui"
   exit 0
 fi
