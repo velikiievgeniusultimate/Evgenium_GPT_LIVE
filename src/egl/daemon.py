@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import shutil
 import signal
@@ -17,7 +16,7 @@ from .control import ControlServer
 from .hotword import HotwordListener
 from .indicator_client import IndicatorClient
 from .state import append_debug_event, debug_screenshot_path, write_state
-from .volume import EGL_AUDIO_APP_NAME, schedule_assistant_volume
+from .volume import schedule_assistant_volume, set_assistant_volume
 
 LOG = logging.getLogger(__name__)
 
@@ -35,12 +34,6 @@ def run_daemon() -> int:
     cfg = load_config()
     if not cfg.chat_url:
         raise RuntimeError("EGL is not configured. Run: egl setup")
-
-    # The hidden Chromium inherits these PulseAudio/PipeWire properties. They
-    # let EGL address only its own playback stream instead of changing the
-    # desktop/master volume or an unrelated Chromium window.
-    os.environ["PULSE_PROP_application.name"] = EGL_AUDIO_APP_NAME
-    os.environ["PULSE_PROP_media.role"] = "phone"
 
     events: queue.Queue[str] = queue.Queue()
     stopping = threading.Event()
@@ -92,6 +85,14 @@ def run_daemon() -> int:
     next_browser_restart = 0.0
     next_page_refresh = 0.0
 
+    def browser_display() -> str | None:
+        # ChatGPTBrowser owns the private Xvfb display. PipeWire exposes the
+        # same value as window.x11.display on Chromium's sink-input.
+        if browser is None:
+            return None
+        value = getattr(browser, "_display", None)
+        return str(value) if value else None
+
     def snapshot(reason: str, *, log_success: bool = True) -> None:
         if browser is None or not browser.is_running():
             if log_success:
@@ -134,8 +135,17 @@ def run_daemon() -> int:
         browser_ready = browser.open_runtime()
         browser_restart_backoff = 10.0
         page_refresh_backoff = 10.0
-        append_debug_event("browser_started", "permanent hidden Chromium", ready=browser_ready)
-        LOG.info("Permanent hidden Chromium started; ChatGPT ready=%s", browser_ready)
+        append_debug_event(
+            "browser_started",
+            "permanent hidden Chromium",
+            ready=browser_ready,
+            x11_display=browser_display(),
+        )
+        LOG.info(
+            "Permanent hidden Chromium started; ChatGPT ready=%s display=%s",
+            browser_ready,
+            browser_display(),
+        )
         return browser_ready
 
     listener.start()
@@ -233,10 +243,11 @@ def run_daemon() -> int:
                         )
 
                     browser.start_voice()
-                    # Chromium creates its playback sink-input shortly after
-                    # entering Voice. Apply the saved per-assistant volume in a
-                    # background thread so wake latency is unaffected.
-                    schedule_assistant_volume(cfg.assistant_volume_percent, wait_seconds=2.5)
+                    schedule_assistant_volume(
+                        cfg.assistant_volume_percent,
+                        x11_display=browser_display(),
+                        wait_seconds=2.5,
+                    )
                     voice_active = True
                     listener.set_voice_active(True)
                     indicator.send(mode="listening")
@@ -246,6 +257,7 @@ def run_daemon() -> int:
                         "Voice start click completed",
                         exit_button_visible=browser.is_voice_active_ui(),
                         assistant_volume=cfg.assistant_volume_percent,
+                        x11_display=browser_display(),
                     )
                     snapshot("after_voice_start")
                     LOG.info("ChatGPT Voice started from preloaded tab")
@@ -328,6 +340,28 @@ def run_daemon() -> int:
                     method,
                     total_elapsed_ms,
                 )
+
+            elif command.startswith("volume:"):
+                try:
+                    percent = min(150, max(0, int(command.split(":", 1)[1])))
+                    cfg.assistant_volume_percent = percent
+                    display = browser_display()
+                    changed = set_assistant_volume(percent, x11_display=display)
+                    append_debug_event(
+                        "assistant_volume",
+                        f"{percent}%",
+                        changed_streams=changed,
+                        x11_display=display,
+                        voice_active=voice_active,
+                    )
+                    LOG.info(
+                        "Live assistant volume: %d%% changed=%d display=%s",
+                        percent,
+                        changed,
+                        display,
+                    )
+                except (TypeError, ValueError) as exc:
+                    append_debug_event("assistant_volume_failed", command, error=str(exc))
 
             elif command in {"debug_snapshot", "browser_snapshot"}:
                 snapshot("manual_debug_snapshot")
