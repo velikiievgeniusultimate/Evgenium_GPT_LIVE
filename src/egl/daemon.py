@@ -16,7 +16,7 @@ from .control import ControlServer
 from .hotword import HotwordListener
 from .indicator_client import IndicatorClient
 from .state import append_debug_event, debug_screenshot_path, write_state
-from .volume import schedule_assistant_volume, set_assistant_volume
+from .volume import set_assistant_volume
 
 LOG = logging.getLogger(__name__)
 
@@ -84,6 +84,14 @@ def run_daemon() -> int:
     page_refresh_backoff = 10.0
     next_browser_restart = 0.0
     next_page_refresh = 0.0
+
+    # Playback streams are not guaranteed to exist when Voice UI opens. Chromium
+    # may create its PipeWire/Pulse sink-input only when GPT actually starts
+    # speaking, which can happen many seconds later. Keep a desired volume in
+    # daemon state and continuously enforce it for the whole Voice session.
+    assistant_volume_target = cfg.assistant_volume_percent
+    next_volume_enforce = 0.0
+    volume_stream_present = False
 
     def browser_display() -> str | None:
         # ChatGPTBrowser owns the private Xvfb display. PipeWire exposes the
@@ -157,7 +165,7 @@ def run_daemon() -> int:
         microphone=cfg.microphone_device,
         wake_threshold=cfg.wake_confidence_threshold,
         stop_threshold=cfg.stop_confidence_threshold,
-        assistant_volume=cfg.assistant_volume_percent,
+        assistant_volume=assistant_volume_target,
         wake_aliases=cfg.wake_aliases,
         stop_aliases=cfg.stop_aliases,
     )
@@ -243,20 +251,17 @@ def run_daemon() -> int:
                         )
 
                     browser.start_voice()
-                    schedule_assistant_volume(
-                        cfg.assistant_volume_percent,
-                        x11_display=browser_display(),
-                        wait_seconds=2.5,
-                    )
                     voice_active = True
                     listener.set_voice_active(True)
+                    next_volume_enforce = 0.0
+                    volume_stream_present = False
                     indicator.send(mode="listening")
                     write_state("listening", f'waiting for "{cfg.stop_phrase}"')
                     append_debug_event(
                         "voice_started",
                         "Voice start click completed",
                         exit_button_visible=browser.is_voice_active_ui(),
-                        assistant_volume=cfg.assistant_volume_percent,
+                        assistant_volume=assistant_volume_target,
                         x11_display=browser_display(),
                     )
                     snapshot("after_voice_start")
@@ -307,6 +312,8 @@ def run_daemon() -> int:
                     append_debug_event("STOP_EXCEPTION", str(exc))
 
                 voice_active = False
+                volume_stream_present = False
+                next_volume_enforce = 0.0
                 ui_after = bool(browser and browser.is_voice_active_ui())
                 browser_ready = bool(browser and browser.is_running() and browser.has_voice_button())
                 total_elapsed_ms = int((time.monotonic() - stop_started) * 1000)
@@ -344,21 +351,26 @@ def run_daemon() -> int:
             elif command.startswith("volume:"):
                 try:
                     percent = min(150, max(0, int(command.split(":", 1)[1])))
+                    assistant_volume_target = percent
                     cfg.assistant_volume_percent = percent
                     display = browser_display()
                     changed = set_assistant_volume(percent, x11_display=display)
+                    volume_stream_present = changed > 0
+                    next_volume_enforce = 0.0 if voice_active else time.monotonic() + 1.0
                     append_debug_event(
                         "assistant_volume",
                         f"{percent}%",
                         changed_streams=changed,
+                        queued_until_stream=voice_active and changed == 0,
                         x11_display=display,
                         voice_active=voice_active,
                     )
                     LOG.info(
-                        "Live assistant volume: %d%% changed=%d display=%s",
+                        "Assistant volume target: %d%% changed=%d display=%s voice_active=%s",
                         percent,
                         changed,
                         display,
+                        voice_active,
                     )
                 except (TypeError, ValueError) as exc:
                     append_debug_event("assistant_volume_failed", command, error=str(exc))
@@ -396,6 +408,27 @@ def run_daemon() -> int:
 
             if voice_active:
                 indicator.send(level=meter.level, mode="listening")
+
+                # Persistent volume guard: the stream may appear long after the
+                # Voice UI opens, and Chromium may recreate it during a session.
+                # Re-apply the target periodically, with faster polling while no
+                # stream has been seen yet.
+                if now >= next_volume_enforce:
+                    display = browser_display()
+                    changed = set_assistant_volume(
+                        assistant_volume_target,
+                        x11_display=display,
+                    )
+                    present = changed > 0
+                    if present != volume_stream_present:
+                        append_debug_event(
+                            "assistant_volume_stream_found" if present else "assistant_volume_stream_waiting",
+                            f"{assistant_volume_target}%",
+                            changed_streams=changed,
+                            x11_display=display,
+                        )
+                    volume_stream_present = present
+                    next_volume_enforce = now + (1.25 if present else 0.35)
 
     finally:
         append_debug_event("daemon_stopping", "EGL daemon stopping")
