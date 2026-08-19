@@ -35,7 +35,6 @@ from .control import send_command
 from .integration import install_integrations
 from .microphone import input_device_label, resolve_input_sample_rate
 from .state import debug_screenshot_path, read_debug_events, read_state
-from .volume import set_assistant_volume
 
 
 class DebugWindow(QDialog):
@@ -286,7 +285,7 @@ class SettingsWindow(QMainWindow):
         volume_layout.addWidget(self.volume_status)
         volume_hint = QLabel(
             "100% — обычная громкость. 101–150% — программное усиление только потока EGL; "
-            "на высоких значениях возможны искажения."
+            "на высоких значениях возможны искажения. Значение сохраняется автоматически."
         )
         volume_hint.setWordWrap(True)
         volume_layout.addWidget(volume_hint)
@@ -444,20 +443,41 @@ class SettingsWindow(QMainWindow):
         if int(value) > 100:
             self.volume_status.setText("Усиление выше системных 100% включено.")
         else:
-            self.volume_status.setText("Регулируется только звук голосового помощника EGL.")
+            self.volume_status.setText("Целевой уровень громкости EGL выбран.")
         if apply:
             self._volume_apply_timer.start()
 
     def _apply_volume_live(self) -> None:
         value = self.assistant_volume.value()
-        changed = set_assistant_volume(value)
-        if changed:
+
+        # Volume is its own live setting. Persist it immediately without
+        # restarting the daemon or forcing the user to press the general Save
+        # button, then send the new target to the running daemon.
+        self.cfg.assistant_volume_percent = value
+        try:
+            save_config(self.cfg)
+        except Exception as exc:
+            self.volume_status.setText(f"Не удалось сохранить громкость: {exc}")
+            return
+
+        try:
+            send_command(f"volume:{value}")
+        except OSError as exc:
             self.volume_status.setText(
-                f"Применено сейчас: {value}% к {changed} аудиопотоку(ам) EGL."
+                f"Сохранено {value}%, но daemon сейчас не отвечает: {exc}"
+            )
+            return
+
+        state = read_state()
+        if state.mode == "listening":
+            self.volume_status.setText(
+                f"Сохранено {value}%. EGL применит уровень к текущему потоку или сразу, "
+                "как только GPT начнёт воспроизводить звук."
             )
         else:
             self.volume_status.setText(
-                f"{value}% сохранится для Voice; активный аудиопоток EGL сейчас не найден."
+                f"Сохранено {value}%. Voice сейчас не активен; уровень применится "
+                "автоматически при следующем воспроизведении голоса GPT."
             )
 
     def _command(self, command: str) -> None:
