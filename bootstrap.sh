@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="0.5.7"
+BOOTSTRAP_VERSION="0.5.8"
 REPO_URL="https://github.com/velikiievgeniusultimate/Evgenium_GPT_LIVE.git"
 EGL_REF="${EGL_REF:-main}"
 EGL_HOME="${EGL_HOME:-$HOME/Evgenium_GPT}"
