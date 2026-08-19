@@ -29,7 +29,7 @@ def install_service(enable: bool = True) -> Path:
     executable_text = _systemd_quote(str(executable))
     home_text = _systemd_quote(str(egl_home))
 
-    # Network is intentionally NOT an ordering dependency. EGL 0.5 starts its
+    # Network is intentionally NOT an ordering dependency. EGL starts its
     # private Xvfb + Chromium immediately, but that local browser stack is able
     # to stay alive with VPN/network unavailable and recover the same tab later.
     # Start limiting still protects against genuine code/config crash loops.
@@ -54,7 +54,12 @@ WantedBy=default.target
     if shutil.which("systemctl"):
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
         if enable:
-            subprocess.run(["systemctl", "--user", "enable", "--now", "egl.service"], check=False)
+            # A previous bad build may have exhausted StartLimitBurst. Updating
+            # the code does not clear that state automatically, so always reset
+            # it before starting the freshly installed service.
+            subprocess.run(["systemctl", "--user", "enable", "egl.service"], check=False)
+            subprocess.run(["systemctl", "--user", "reset-failed", "egl.service"], check=False)
+            subprocess.run(["systemctl", "--user", "restart", "egl.service"], check=False)
     return target
 
 
